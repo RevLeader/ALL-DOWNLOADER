@@ -1,0 +1,5 @@
+app/downloads/
+!app/downloads/.gitkeep
+__pycache__/
+*.pyc
+venv/
