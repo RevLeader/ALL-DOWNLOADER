@@ -3,3 +3,7 @@ app/downloads/
 __pycache__/
 *.pyc
 venv/
+.venv/
+
+# Never commit real secrets
+.env
