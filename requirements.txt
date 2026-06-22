@@ -10,3 +10,6 @@ itsdangerous>=2.1
 python-dotenv>=1.0
 pyzipper>=0.3.6
 imageio[ffmpeg]
+
+# Required for FastAPI file uploads (used by cookie/oauth upload endpoint)
+python-multipart>=0.0.9
