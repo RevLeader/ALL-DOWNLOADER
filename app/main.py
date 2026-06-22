@@ -17,7 +17,7 @@ import uuid
 import threading
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -69,6 +69,21 @@ COOKIES_DIR_CANDIDATES = [
 ]
 COOKIES_DIR = next((p for p in COOKIES_DIR_CANDIDATES if p.exists()), None)
 
+# Phrases that indicate YouTube bot-detection fired. Checked in run_job() after
+# a DownloadError to decide whether to trigger an immediate cookie refresh.
+_BOT_ERROR_PHRASES = [
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "not a bot",
+    "http error 429",
+    "too many requests",
+]
+
+# Files that live in DOWNLOADS_DIR for system/housekeeping purposes and must
+# never be mistaken for a completed video download by _find_recently_written_file.
+# Populated after DOMAIN_COOKIE_MAP is defined below.
+_DOWNLOADS_DIR_SYSTEM_FILES: set[str] = {"archive.txt", "_cookie_meta.json"}
+
 DOMAIN_COOKIE_MAP = {
     "youtube.com":   "youtube.txt",
     "youtu.be":      "youtube.txt",
@@ -78,6 +93,9 @@ DOMAIN_COOKIE_MAP = {
     "fb.watch":      "facebook.txt",
     "instagram.com": "instagram.txt",
 }
+# Include all cookie filenames so _find_recently_written_file never mistakes them
+# for downloaded videos (they share the same DOWNLOADS_DIR).
+_DOWNLOADS_DIR_SYSTEM_FILES.update(set(DOMAIN_COOKIE_MAP.values()))
 
 def auto_cookie_file(url: str) -> Optional[str]:
     """
@@ -165,7 +183,7 @@ class Job:
         self.size_total: Optional[str] = None
         self.log: List[str] = []
         self.error: Optional[str] = None
-        self.created_at = datetime.utcnow()
+        self.created_at = datetime.now(timezone.utc)
         self.cancel_requested = False
         self.storage_key: Optional[str] = None
         self.download_ready = False
@@ -557,13 +575,16 @@ def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path
     if not out_dir.exists():
         return None
     since_ts = since.timestamp() - 2  # small clock slack
-    skip_names = {".part", ".ytdl", ".tmp"}
+    skip_extensions = {".part", ".ytdl", ".tmp"}
     candidates = [
         f for f in out_dir.iterdir()
         if f.is_file()
         and f.stat().st_mtime >= since_ts
-        and f.name != "archive.txt"
-        and not any(f.name.endswith(ext) for ext in skip_names)
+        # Exclude known system files that share DOWNLOADS_DIR (cookie files,
+        # meta JSON, archive lists). Without this, a cookie file written by
+        # the background refresher gets mistaken for the downloaded video.
+        and f.name not in _DOWNLOADS_DIR_SYSTEM_FILES
+        and not any(f.name.endswith(ext) for ext in skip_extensions)
     ]
     if not candidates:
         return None
@@ -768,13 +789,6 @@ def run_job(job: Job, req: DownloadRequest):
             job.status = JobStatus.ERROR
             job.error = str(e)
             job.add_log(f"Error: {e}")
-            _BOT_ERROR_PHRASES = [
-                "sign in to confirm",
-                "confirm you're not a bot",
-                "not a bot",
-                "http error 429",
-                "too many requests",
-            ]
             if any(p in str(e).lower() for p in _BOT_ERROR_PHRASES):
                 job.add_log("⚠ Bot check detected — refreshing cookies in background. Retry this job in ~30s.")
                 cookie_refresher.force_refresh()
@@ -1233,7 +1247,7 @@ async def upload_cookies(
     # Record upload time
     meta = _load_cookie_meta()
     meta[domain_lower] = {
-        "uploaded_at": datetime.utcnow().isoformat(),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "filename": cookie_filename,
         "size_bytes": len(content),
     }
@@ -1257,7 +1271,7 @@ def cookie_status():
     """
     meta = _load_cookie_meta()
     result = {}
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for domain, cookie_filename in DOMAIN_COOKIE_MAP.items():
         info = meta.get(domain, {})
@@ -1275,6 +1289,10 @@ def cookie_status():
         if uploaded_at_str:
             try:
                 uploaded_at = datetime.fromisoformat(uploaded_at_str)
+                # Old records saved as naive UTC; new ones are timezone-aware.
+                # Normalise to aware so the subtraction doesn't raise TypeError.
+                if uploaded_at.tzinfo is None:
+                    uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
                 age_days = (now - uploaded_at).days
                 # Cookies typically expire after ~7-30 days depending on site
                 # Flag as "expiring" after 7 days, "expired" after 14

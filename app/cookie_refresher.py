@@ -6,78 +6,27 @@ Background service that keeps YouTube cookies fresh automatically, so the
 
 HOW IT WORKS
 ============
-YouTube's bot detection fires when:
-  1. yt-dlp uses an expired or missing session cookie, OR
-  2. yt-dlp uses a "from browser" cookie extraction that YouTube has flagged.
+Strategy A — yt-dlp --cookies-from-browser (Chrome/Firefox/Edge)
+  Reads directly from the browser's live cookie store. Always current.
+  ⚠ Requires a real browser on the same machine. Works on local or VPS.
+  Set COOKIE_BROWSER=chrome (or firefox/edge/safari).
 
-This module solves both by generating a valid Netscape-format cookies.txt
-using one of two strategies, in priority order:
+Strategy B — OAuth2 via yt-dlp's built-in device-code flow
+  On first run, prints a Google device-auth URL to the server logs.
+  Open it once in any browser, authorize, and the token persists forever.
+  Best for Render/cloud (no browser required after the one-time setup).
+  Enable with USE_OAUTH2=true.
 
-  Strategy A — yt-dlp --cookies-from-browser (Chrome/Firefox/Edge)
-    yt-dlp can read directly from the browser's cookie store.
-    Works on any machine where a browser is installed and has a logged-in
-    YouTube session. Pulls live cookies that are always current.
-    ⚠ Requires a real browser on the same machine. Works great on a local
-    server or a VPS where you've logged into YouTube in a browser once.
-
-  Strategy B — oauth2 plugin (headless, no browser needed)
-    Uses the yt-dlp-get-pot / YouTube OAuth2 flow to get a persistent token
-    that bypasses cookie requirements entirely. Best for Render/cloud hosting
-    where there's no browser.
-
-  Strategy C — Passive rotation (fallback)
-    If neither above is available, the refresher logs a warning and keeps
-    using whatever cookie file is already on disk (the manually uploaded one).
-    It will re-check every REFRESH_INTERVAL_HOURS and upgrade to A or B
-    automatically the moment they become available.
+Strategy C — Passive fallback
+  If neither A nor B works, keeps the existing youtube.txt on disk.
+  Re-checks every REFRESH_INTERVAL_HOURS and upgrades automatically
+  the moment A or B becomes available.
 
 REFRESH SCHEDULE
 ================
-Cookies are refreshed:
-  • On startup (first check within 30 seconds of the server starting)
-  • Every REFRESH_INTERVAL_HOURS (default: 6 hours) after that
-  • Immediately when a download fails with a bot-detection error
-    (call `cookie_refresher.force_refresh()` from your error handler)
-
-SETUP
-=====
-1. Copy this file to your app/ directory alongside main.py.
-2. In main.py, add these two lines near the top of the file:
-
-    from app.cookie_refresher import CookieRefresher
-    cookie_refresher = CookieRefresher(cookies_dir=DOWNLOADS_DIR)
-    cookie_refresher.start()
-
-3. In run_job(), detect bot errors and trigger an immediate refresh:
-
-    except yt_dlp.utils.DownloadError as e:
-        if "Sign in to confirm" in str(e) or "bot" in str(e).lower():
-            cookie_refresher.force_refresh()   # refresh in background, next retry will pick it up
-        ...
-
-4. Optional env vars (set in .env or Render environment):
-
-    COOKIE_BROWSER=chrome          # chrome, firefox, edge, safari (Strategy A)
-    COOKIE_BROWSER_PROFILE=Default # browser profile name (optional)
-    COOKIE_REFRESH_HOURS=6         # how often to refresh (default: 6)
-    YOUTUBE_EMAIL=you@gmail.com    # used to verify login state (optional)
-
-RENDER / CLOUD DEPLOYMENT
-==========================
-On Render, Strategy A won't work (no browser). Use Strategy B (oauth2):
-
-  pip install yt-dlp[default] yt-dlp-get-pot
-
-Then set the env var:
-    USE_OAUTH2=true
-
-The first run will print an auth URL to the logs — open it once in your
-browser to authorize. After that, the token is stored in DOWNLOADS_DIR and
-refreshed silently forever.
-
-Alternatively, keep uploading cookies manually via /api/cookies/upload —
-the refresher will detect that a fresh file exists and won't try to replace it
-until it's older than STALE_AFTER_HOURS (default: 12 hours).
+  • Startup: first check 30 seconds after server starts
+  • Scheduled: every REFRESH_INTERVAL_HOURS (default 6 h)
+  • On-demand: immediately when force_refresh() is called (bot-detection error)
 """
 
 import os
@@ -87,46 +36,25 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("cookie_refresher")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s %(message)s")
-
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 REFRESH_INTERVAL_HOURS = float(os.environ.get("COOKIE_REFRESH_HOURS", "6"))
 STALE_AFTER_HOURS      = float(os.environ.get("COOKIE_STALE_HOURS", "12"))
-COOKIE_BROWSER         = os.environ.get("COOKIE_BROWSER", "chrome").lower()  # chrome/firefox/edge/safari
-COOKIE_BROWSER_PROFILE = os.environ.get("COOKIE_BROWSER_PROFILE", "")        # e.g. "Default"
+COOKIE_BROWSER         = os.environ.get("COOKIE_BROWSER", "chrome").lower()
+COOKIE_BROWSER_PROFILE = os.environ.get("COOKIE_BROWSER_PROFILE", "")
 USE_OAUTH2             = os.environ.get("USE_OAUTH2", "").lower() in ("1", "true", "yes")
 
-# The cookie filename that main.py's DOMAIN_COOKIE_MAP already expects
+# The cookie filename that main.py's DOMAIN_COOKIE_MAP already expects.
 YOUTUBE_COOKIE_FILE = "youtube.txt"
 
-# ── Bot-detection error signatures ────────────────────────────────────────────
-BOT_ERROR_PHRASES = [
-    "sign in to confirm you're not a bot",
-    "sign in to confirm",
-    "confirm you're not a bot",
-    "please sign in",
-    "this video is not available",
-    "http error 429",
-    "too many requests",
-    "video unavailable",
-    "cookies",
-    "bot",
-]
 
-
-def _looks_like_bot_error(message: str) -> bool:
-    msg = message.lower()
-    return any(phrase in msg for phrase in BOT_ERROR_PHRASES)
-
-
-# ── Meta file helpers (mirrors main.py's _load_cookie_meta) ──────────────────
+# ── Meta file helpers (compatible with main.py's _load_cookie_meta format) ───
 
 def _meta_path(cookies_dir: Path) -> Path:
     return cookies_dir / "_cookie_meta.json"
@@ -150,28 +78,30 @@ def _save_meta(cookies_dir: Path, meta: dict):
 
 
 def _cookie_age_hours(cookies_dir: Path) -> Optional[float]:
-    """Returns how old the current youtube.txt is, in hours. None if unknown."""
+    """Returns how old the current youtube.txt is in hours. None if unknown."""
     meta = _load_meta(cookies_dir)
     info = meta.get("youtube.com", {})
     uploaded_at_str = info.get("uploaded_at")
-    if not uploaded_at_str:
-        # Fall back to file mtime
-        cookie_path = cookies_dir / YOUTUBE_COOKIE_FILE
-        if cookie_path.exists():
-            age_secs = time.time() - cookie_path.stat().st_mtime
-            return age_secs / 3600
-        return None
-    try:
-        uploaded_at = datetime.fromisoformat(uploaded_at_str)
-        return (datetime.utcnow() - uploaded_at).total_seconds() / 3600
-    except Exception:
-        return None
+    if uploaded_at_str:
+        try:
+            uploaded_at = datetime.fromisoformat(uploaded_at_str)
+            if uploaded_at.tzinfo is None:
+                uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - uploaded_at).total_seconds() / 3600
+        except Exception:
+            pass
+    # Fall back to file mtime
+    cookie_path = cookies_dir / YOUTUBE_COOKIE_FILE
+    if cookie_path.exists():
+        age_secs = time.time() - cookie_path.stat().st_mtime
+        return age_secs / 3600
+    return None
 
 
 def _update_meta(cookies_dir: Path, strategy: str, size_bytes: int):
     meta = _load_meta(cookies_dir)
     meta["youtube.com"] = {
-        "uploaded_at": datetime.utcnow().isoformat(),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
         "filename": YOUTUBE_COOKIE_FILE,
         "size_bytes": size_bytes,
         "refresh_strategy": strategy,
@@ -184,46 +114,40 @@ def _update_meta(cookies_dir: Path, strategy: str, size_bytes: int):
 
 def _try_browser_extraction(cookies_dir: Path) -> bool:
     """
-    Uses `yt-dlp --cookies-from-browser <browser> --skip-download` to extract
-    and save a fresh Netscape cookies.txt. Works on any machine with a browser.
-    Returns True on success.
+    Uses yt-dlp --cookies-from-browser to extract a fresh Netscape cookies.txt.
+    Works on any machine with a browser. Returns True on success.
     """
     dest = cookies_dir / YOUTUBE_COOKIE_FILE
     tmp  = cookies_dir / "_youtube_tmp.txt"
 
+    browser_arg = COOKIE_BROWSER
+    if COOKIE_BROWSER_PROFILE:
+        browser_arg = f"{COOKIE_BROWSER}:{COOKIE_BROWSER_PROFILE}"
+
     cmd = [
         "yt-dlp",
-        "--cookies-from-browser", COOKIE_BROWSER,
+        "--cookies-from-browser", browser_arg,
         "--cookies", str(tmp),
         "--skip-download",
         "--quiet",
         "--no-warnings",
         "https://www.youtube.com/",
     ]
-    if COOKIE_BROWSER_PROFILE:
-        # Insert profile after browser name: "--cookies-from-browser chrome:Default"
-        cmd[2] = f"{COOKIE_BROWSER}:{COOKIE_BROWSER_PROFILE}"
 
-    logger.info(f"[Strategy A] Extracting cookies from {COOKIE_BROWSER} browser...")
+    logger.info(f"[Strategy A] Extracting cookies from {COOKIE_BROWSER}...")
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if tmp.exists() and tmp.stat().st_size > 200:
             shutil.move(str(tmp), str(dest))
             size = dest.stat().st_size
             _update_meta(cookies_dir, f"browser:{COOKIE_BROWSER}", size)
             logger.info(f"[Strategy A] ✓ Cookies refreshed from {COOKIE_BROWSER} ({size} bytes)")
             return True
-        else:
-            stderr = result.stderr.strip()
-            logger.warning(f"[Strategy A] Browser extraction produced no usable cookies. stderr: {stderr[:300]}")
-            if tmp.exists():
-                tmp.unlink()
-            return False
+        stderr = result.stderr.strip()
+        logger.warning(f"[Strategy A] No usable cookies from browser. stderr: {stderr[:300]}")
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        return False
     except subprocess.TimeoutExpired:
         logger.warning("[Strategy A] Browser extraction timed out.")
         return False
@@ -235,115 +159,74 @@ def _try_browser_extraction(cookies_dir: Path) -> bool:
         return False
 
 
-# ── Strategy B: OAuth2 token (headless, cloud-friendly) ──────────────────────
+# ── Strategy B: OAuth2 device-code flow ───────────────────────────────────────
 
 def _try_oauth2_extraction(cookies_dir: Path) -> bool:
     """
-    Uses the yt-dlp OAuth2 flow to obtain a cookies/token file.
-    Requires: pip install yt-dlp-get-pot  (or the yt-dlp[default] bundle)
-    
-    On first run, prints a URL to the server logs — you visit it once in a
-    browser to authorize. After that, the token is stored and silently refreshed.
-    
-    Returns True if a usable token/cookie file was produced.
+    Uses yt-dlp's built-in OAuth2 device-code flow.
+
+    First run: yt-dlp prints a Google authorization URL to stdout/stderr.
+    Open it in any browser once and authorize. The token is saved automatically
+    and all future refreshes are silent.
+
+    On Render: check the service logs right after first deploy for the URL.
+
+    Returns True if a usable cookie file was produced.
     """
-    try:
-        import yt_dlp  # noqa: F401
-    except ImportError:
-        logger.warning("[Strategy B] yt_dlp not importable, skipping OAuth2.")
-        return False
-
     dest = cookies_dir / YOUTUBE_COOKIE_FILE
-    token_file = cookies_dir / "_yt_oauth2_token.json"
+    tmp  = cookies_dir / "_youtube_oauth2_tmp.txt"
 
-    # Build ydl options for OAuth2 extraction
-    opts = {
-        "quiet": False,           # We want to see the auth URL in logs
-        "no_warnings": False,
-        "skip_download": True,
-        "cookiefile": str(dest),
-        # yt-dlp-get-pot uses this to store OAuth tokens between runs
-        "extractor_args": {
-            "youtube": {
-                "po_token": [],
-                "player_client": ["web"],
-            }
-        },
-    }
+    cmd = [
+        "yt-dlp",
+        "--username", "oauth2",
+        "--password", "",
+        "--cookies", str(tmp),
+        "--skip-download",
+        # Don't suppress output — the auth URL needs to be visible in logs.
+        "https://www.youtube.com/",
+    ]
 
-    # If a token file from a previous run exists, inject it
-    if token_file.exists():
-        try:
-            token_data = json.loads(token_file.read_text())
-            logger.info("[Strategy B] Resuming from existing OAuth2 token.")
-        except Exception:
-            token_data = {}
-    else:
-        token_data = {}
-
-    logger.info("[Strategy B] Attempting OAuth2 extraction (check logs for auth URL if first run)...")
+    logger.info(
+        "[Strategy B] Attempting OAuth2 device-code flow. "
+        "If this is the first run, check logs for a Google authorization URL."
+    )
     try:
-        import yt_dlp
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info("https://www.youtube.com/", download=False)
+        # Generous timeout: OAuth2 device-code expires in ~5 minutes. We give
+        # 6 minutes so the user has time to see the URL and authorize before
+        # yt-dlp times out internally.
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
 
-        if dest.exists() and dest.stat().st_size > 200:
+        # Surface the auth URL even from quiet mode
+        if result.stdout.strip():
+            logger.info(f"[Strategy B] yt-dlp stdout: {result.stdout.strip()[:600]}")
+        if result.stderr.strip():
+            logger.info(f"[Strategy B] yt-dlp stderr: {result.stderr.strip()[:600]}")
+
+        if tmp.exists() and tmp.stat().st_size > 200:
+            shutil.move(str(tmp), str(dest))
             size = dest.stat().st_size
             _update_meta(cookies_dir, "oauth2", size)
             logger.info(f"[Strategy B] ✓ OAuth2 cookies written ({size} bytes)")
             return True
-        else:
-            logger.warning("[Strategy B] OAuth2 extraction produced no usable cookies file.")
-            return False
-    except Exception as e:
-        msg = str(e)
-        if "authorization" in msg.lower() or "oauth" in msg.lower():
-            logger.info(f"[Strategy B] OAuth2 needs authorization — check server logs for URL. ({msg[:200]})")
-        else:
-            logger.warning(f"[Strategy B] OAuth2 error: {msg[:300]}")
+
+        logger.warning("[Strategy B] OAuth2 produced no usable cookie file.")
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
         return False
 
-
-# ── Strategy C: po_token via yt-dlp-get-pot (most robust, headless) ──────────
-
-def _try_pot_extraction(cookies_dir: Path) -> bool:
-    """
-    Uses yt-dlp-get-pot to generate a Proof of Origin token (PO token).
-    This is the most robust headless solution for cloud deployments.
-
-    Install: pip install yt-dlp-get-pot
-
-    The PO token is passed as an extractor_arg and combined with a minimal
-    cookie file so YouTube accepts the request as a real browser session.
-    Returns True if successful.
-    """
-    try:
-        import yt_dlp
-    except ImportError:
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "[Strategy B] OAuth2 timed out. The device-code may have expired. "
+            "Check earlier logs for the authorization URL and try force-refreshing."
+        )
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
         return False
-
-    dest = cookies_dir / YOUTUBE_COOKIE_FILE
-    logger.info("[Strategy C] Attempting PO token extraction via yt-dlp-get-pot...")
-    try:
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "cookiefile": str(dest),
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(
-                "https://www.youtube.com/watch?v=BaW_jenozKc",  # stable public test video
-                download=False,
-            )
-        if dest.exists() and dest.stat().st_size > 200:
-            size = dest.stat().st_size
-            _update_meta(cookies_dir, "pot", size)
-            logger.info(f"[Strategy C] ✓ PO token cookies written ({size} bytes)")
-            return True
+    except FileNotFoundError:
+        logger.warning("[Strategy B] yt-dlp not found in PATH.")
         return False
     except Exception as e:
-        logger.warning(f"[Strategy C] PO token error: {str(e)[:200]}")
+        logger.warning(f"[Strategy B] Unexpected error: {e}")
         return False
 
 
@@ -357,48 +240,43 @@ def refresh_cookies(cookies_dir: Path, force: bool = False) -> bool:
         cookies_dir: Path where youtube.txt is stored (your DOWNLOADS_DIR).
         force:       If True, refresh even if cookies appear fresh.
 
-    Returns True if cookies were successfully refreshed.
+    Returns True if cookies were successfully refreshed (or were already fresh).
     """
     age = _cookie_age_hours(cookies_dir)
 
     if not force:
         if age is not None and age < STALE_AFTER_HOURS:
-            logger.debug(f"Cookies are {age:.1f}h old (< {STALE_AFTER_HOURS}h threshold). Skipping refresh.")
+            logger.debug(f"Cookies are {age:.1f}h old (< {STALE_AFTER_HOURS}h). Skipping.")
             return True  # Already fresh enough
 
-    logger.info(f"Refreshing YouTube cookies (age={age:.1f}h, force={force})..." if age else
-                f"Refreshing YouTube cookies (no age info, force={force})...")
+    age_str = f"{age:.1f}h" if age is not None else "unknown age"
+    logger.info(f"Refreshing YouTube cookies (age={age_str}, force={force})...")
 
-    # Strategy A: local browser (best quality, works on local/VPS)
+    # Strategy A: local browser (best quality, local/VPS only).
+    # Skipped when USE_OAUTH2=true so cloud deployments go straight to B.
     if not USE_OAUTH2:
         if _try_browser_extraction(cookies_dir):
             return True
 
-    # Strategy B: OAuth2 (good for headless/cloud, needs one-time auth)
-    if USE_OAUTH2 or True:   # Always try as fallback
-        if _try_oauth2_extraction(cookies_dir):
-            return True
-
-    # Strategy C: PO token (alternative headless approach)
-    if _try_pot_extraction(cookies_dir):
+    # Strategy B: OAuth2 device-code flow (headless, cloud-friendly).
+    if _try_oauth2_extraction(cookies_dir):
         return True
 
-    # No strategy worked
+    # All strategies failed — keep whatever is on disk.
     cookie_path = cookies_dir / YOUTUBE_COOKIE_FILE
     if cookie_path.exists():
         logger.warning(
             "All auto-refresh strategies failed. Keeping existing cookie file. "
-            "Consider uploading a fresh one via /api/cookies/upload or running "
-            "the extractor manually on your server."
+            "Consider uploading a fresh one via /api/cookies/upload."
         )
-        return False
     else:
         logger.error(
             "All auto-refresh strategies failed and no cookie file exists. "
             "YouTube bot-detection errors are likely. "
-            "Please upload cookies via /api/cookies/upload."
+            "Please upload cookies via /api/cookies/upload or set USE_OAUTH2=true "
+            "and check logs for the authorization URL."
         )
-        return False
+    return False
 
 
 # ── Background refresh thread ──────────────────────────────────────────────────
@@ -412,7 +290,7 @@ class CookieRefresher:
         cookie_refresher = CookieRefresher(cookies_dir=DOWNLOADS_DIR)
         cookie_refresher.start()
 
-    Then in your error handler for bot-detection errors:
+    Then in your bot-detection error handler:
         cookie_refresher.force_refresh()
     """
 
@@ -431,12 +309,15 @@ class CookieRefresher:
         self._thread = threading.Thread(
             target=self._loop,
             name="cookie-refresher",
-            daemon=True,  # Dies when the main process exits
+            daemon=True,
         )
         self._thread.start()
-        logger.info(f"Cookie refresher started. Interval: {REFRESH_INTERVAL_HOURS}h, "
-                    f"stale threshold: {STALE_AFTER_HOURS}h, "
-                    f"browser: {COOKIE_BROWSER}, oauth2: {USE_OAUTH2}")
+        logger.info(
+            f"Cookie refresher started. "
+            f"interval={REFRESH_INTERVAL_HOURS}h, "
+            f"stale_threshold={STALE_AFTER_HOURS}h, "
+            f"strategy={'oauth2' if USE_OAUTH2 else f'browser:{COOKIE_BROWSER}'}"
+        )
 
     def stop(self):
         """Stop the background thread gracefully."""
@@ -448,41 +329,33 @@ class CookieRefresher:
         """
         Trigger an immediate cookie refresh in the background.
         Call this when a download fails with a bot-detection error.
-        The refresh runs asynchronously — the current job will fail (as
-        expected), but the NEXT retry will pick up the fresh cookies.
+        The refresh is async — the current job fails (unavoidable), but
+        a retry ~30s later will pick up the fresh cookies.
         """
-        logger.info("Bot-detection error detected — triggering immediate cookie refresh.")
+        logger.info("Bot-detection error — triggering immediate cookie refresh.")
         self._force_refresh_event.set()
 
     def _loop(self):
-        # Initial delay: let the server finish starting up, then do a first check
+        # Let the server finish starting up, then do the first check.
         self._stop_event.wait(timeout=30)
         if self._stop_event.is_set():
             return
 
         while not self._stop_event.is_set():
-            # Check if forced refresh was requested
             forced = self._force_refresh_event.is_set()
             if forced:
                 self._force_refresh_event.clear()
 
-            # Run the refresh (thread-safe)
             with self._refresh_lock:
                 try:
                     success = refresh_cookies(self.cookies_dir, force=forced)
                     if success:
-                        self._last_refresh = datetime.utcnow()
+                        self._last_refresh = datetime.now(timezone.utc)
                 except Exception as e:
                     logger.error(f"Cookie refresh loop error: {e}", exc_info=True)
 
-            # Sleep until next interval (but wake up early if forced)
-            interval_secs = REFRESH_INTERVAL_HOURS * 3600
-            woke_early = self._force_refresh_event.wait(timeout=interval_secs)
-            # If we woke early due to force flag, loop immediately (don't sleep again)
-
-    @property
-    def last_refresh(self) -> Optional[datetime]:
-        return self._last_refresh
+            # Sleep until next scheduled interval; wake early on force_refresh.
+            self._force_refresh_event.wait(timeout=REFRESH_INTERVAL_HOURS * 3600)
 
     def status(self) -> dict:
         """Returns current status dict suitable for an API response."""
