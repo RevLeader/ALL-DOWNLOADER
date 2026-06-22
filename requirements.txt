@@ -13,3 +13,4 @@ imageio[ffmpeg]
 
 # Required for FastAPI file uploads (used by cookie/oauth upload endpoint)
 python-multipart>=0.0.9
+yt-dlp-get-pot
