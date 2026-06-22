@@ -55,8 +55,19 @@ def upload_file(local_path: str, job_id: str, filename: str) -> str:
     """
     Uploads a finished file from local disk to R2.
     Returns the storage key (path inside the bucket) to save on the job record.
+
+    The storage key intentionally does NOT embed the raw filename. Video/post
+    titles can contain emoji, pipes, colons, and other characters that some
+    HTTP/SSL stacks mishandle when they end up as part of a request path —
+    this caused real upload failures (SSL handshake errors) on titles with
+    heavy emoji use. The key is built from the job_id (already a safe, unique
+    hex string) plus just the file extension. The original filename is
+    preserved separately (job.filename) and reapplied via Content-Disposition
+    when the file is downloaded, so the person still gets a sensible filename
+    when they save it.
     """
-    key = f"jobs/{job_id}/{filename}"
+    ext = os.path.splitext(filename)[1]  # e.g. ".mp4" — empty string if none
+    key = f"jobs/{job_id}/file{ext}"
     content_type, _ = mimetypes.guess_type(filename)
     extra_args = {"ContentType": content_type} if content_type else {}
 
@@ -86,14 +97,29 @@ def get_presigned_download_url(storage_key: str, filename: str = None, expires_i
     """
     params = {"Bucket": R2_BUCKET_NAME, "Key": storage_key}
     if filename:
-        # Quotes around the filename handle names with spaces/special chars.
-        params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+        params["ResponseContentDisposition"] = f'attachment; filename="{_safe_header_filename(filename)}"'
 
     return _client.generate_presigned_url(
         "get_object",
         Params=params,
         ExpiresIn=expires_in,
     )
+
+
+def _safe_header_filename(filename: str) -> str:
+    """
+    Strips characters that could break or inject into the Content-Disposition
+    header (quotes, control characters, newlines) and drops non-ASCII so
+    emoji-heavy video titles can't cause malformed/rejected headers. This
+    only affects the filename shown when saving — the actual file content
+    is untouched.
+    """
+    # Drop anything outside printable ASCII, then strip quote/backslash
+    # characters which could otherwise break out of the quoted value.
+    cleaned = filename.encode("ascii", "ignore").decode("ascii")
+    cleaned = cleaned.replace('"', "").replace("\\", "").replace("\n", "").replace("\r", "")
+    cleaned = cleaned.strip()
+    return cleaned or "download"
 
 
 def delete_from_bucket(storage_key: str):
