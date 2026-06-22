@@ -73,15 +73,25 @@ def delete_local_file(local_path: str):
         pass  # not fatal — worst case, an orphaned file sits on ephemeral disk until next restart
 
 
-def get_presigned_download_url(storage_key: str, expires_in: int = 3600) -> str:
+def get_presigned_download_url(storage_key: str, filename: str = None, expires_in: int = 3600) -> str:
     """
     Generates a temporary, expiring URL that lets someone download the file
     directly from R2 without needing R2 credentials themselves.
     Default expiry: 1 hour.
+
+    Setting ResponseContentDisposition makes the browser save the file
+    (Chrome's download prompt / straight into Downloads) instead of just
+    opening it inline in a new tab, which is what happens by default for
+    browser-renderable types like video/mp4 or audio/m4a.
     """
+    params = {"Bucket": R2_BUCKET_NAME, "Key": storage_key}
+    if filename:
+        # Quotes around the filename handle names with spaces/special chars.
+        params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+
     return _client.generate_presigned_url(
         "get_object",
-        Params={"Bucket": R2_BUCKET_NAME, "Key": storage_key},
+        Params=params,
         ExpiresIn=expires_in,
     )
 

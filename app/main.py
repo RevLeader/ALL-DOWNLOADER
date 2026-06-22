@@ -309,6 +309,7 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         "outtmpl": str(out_dir / template),
         "noplaylist": req.mode not in (Mode.PLAYLIST, Mode.PLAYLIST_RANGE),
         "progress_hooks": [lambda d: _progress_hook(job, d)],
+        "postprocessor_hooks": [lambda d: _postprocessor_hook(job, d)],
         "logger": job_logger,
         "quiet": True,
         "no_warnings": True,
@@ -442,6 +443,13 @@ def _progress_hook(job: Job, d: dict):
             job.progress = downloaded / total * 100
         job.speed = d.get("_speed_str", "").strip() or None
         job.eta = d.get("_eta_str", "").strip() or None
+        # NOTE: this filename is a snapshot taken *during* download, before
+        # postprocessing (merge, thumbnail embed, metadata) runs. It can be
+        # wrong by the time the job finishes — e.g. postprocessing remuxes
+        # a .webm fragment into .mp4, or falls back to .m4a if no video
+        # stream merged. We still set it here for live progress display,
+        # but the postprocessor hook below overwrites it with the real
+        # final filename once processing actually completes.
         fname = d.get("filename")
         if fname:
             job.filename = os.path.basename(fname)
@@ -451,9 +459,43 @@ def _progress_hook(job: Job, d: dict):
         job.add_log("Finished downloading, now processing (thumbnail/metadata)...")
 
 
+def _postprocessor_hook(job: Job, d: dict):
+    """
+    Fires after each postprocessor step (merge, thumbnail embed, metadata).
+    'filepath' here is yt-dlp's own authoritative answer for the file's
+    current location/name — more trustworthy than the download-time
+    snapshot from _progress_hook, since postprocessing can change the
+    extension or filename after that snapshot was taken.
+    """
+    if d.get("status") == "finished":
+        filepath = d.get("info_dict", {}).get("filepath") or d.get("filepath")
+        if filepath:
+            job.filename = os.path.basename(filepath)
+
+
 # --------------------------------------------------------------------------
 # Workers (Download, Upload-to-R2, & Zip)
 # --------------------------------------------------------------------------
+
+def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path]:
+    """
+    Fallback for when the tracked job.filename doesn't exist on disk —
+    looks for a file in out_dir whose modification time is after the job
+    started. Only returns a result if exactly one candidate is found,
+    since picking the "wrong" file among several ambiguous candidates
+    would be worse than just failing with a clear error.
+    """
+    if not out_dir.exists():
+        return None
+    since_ts = since.timestamp()
+    candidates = [
+        f for f in out_dir.iterdir()
+        if f.is_file() and f.stat().st_mtime >= since_ts and not f.name.endswith((".part", ".ytdl", ".tmp"))
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
 
 def run_job(job: Job, req: DownloadRequest):
     job.status = JobStatus.RUNNING
@@ -506,11 +548,38 @@ def run_job(job: Job, req: DownloadRequest):
                     _persist(job)
                     return
             else:
-                job.status = JobStatus.ERROR
-                job.error = f"Expected file '{job.filename}' not found on disk after download."
-                job.add_log(f"Error: expected file '{job.filename}' not found on disk after download.")
-                _persist(job)
-                return
+                # The hooks' tracked filename doesn't exist on disk — this
+                # can happen if postprocessing renamed/changed the extension
+                # in a way neither hook caught. Last resort: look for a file
+                # in the output dir that was just written (modified after
+                # this job started) before giving up entirely.
+                fallback_path = _find_recently_written_file(out_dir, job.created_at)
+                if fallback_path:
+                    job.filename = fallback_path.name
+                    job.add_log(f"Note: expected filename mismatch — found '{job.filename}' instead.")
+                    job.status = JobStatus.UPLOADING
+                    job.add_log("Uploading finished file to cloud storage...")
+                    _persist(job)
+
+                    try:
+                        storage_key = upload_file(str(fallback_path), job.id, job.filename)
+                        job.storage_key = storage_key
+                        job.download_ready = True
+                        job.add_log("Upload complete. File ready to download.")
+                        delete_local_file(str(fallback_path))
+                    except Exception as upload_err:
+                        job.status = JobStatus.ERROR
+                        job.error = f"Download succeeded but cloud upload failed: {upload_err}"
+                        job.add_log(f"Error: cloud upload failed ({upload_err}). "
+                                    f"File is stuck on local disk and will be lost on next restart.")
+                        _persist(job)
+                        return
+                else:
+                    job.status = JobStatus.ERROR
+                    job.error = f"Expected file '{job.filename}' not found on disk after download."
+                    job.add_log(f"Error: expected file '{job.filename}' not found on disk after download.")
+                    _persist(job)
+                    return
 
         job.status = JobStatus.DONE
         job.add_log("Done.")
@@ -781,7 +850,7 @@ def get_download_url(job_id: str):
     if not job.download_ready or not job.storage_key:
         raise HTTPException(409, "File isn't ready yet")
 
-    url = get_presigned_download_url(job.storage_key, expires_in=3600)
+    url = get_presigned_download_url(job.storage_key, filename=job.filename, expires_in=3600)
     return {"url": url, "expires_in": 3600}
 
 
