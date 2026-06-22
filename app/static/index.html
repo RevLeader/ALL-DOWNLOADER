@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deck — yt-dlp</title>
+<style>
+:root {
+  --f-display: -apple-system, "SF Pro Display", "Segoe UI Semibold", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --f-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --f-mono: ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", Consolas, "Roboto Mono", monospace;
+  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-lg: 10px;
+}
+
+[data-theme="amber"] {
+  --bg: #15130f; --surface: #1f1b14; --surface-raised: #2a2418;
+  --line: #3d3526; --line-strong: #4d4330;
+  --tape: #e8dcc4; --ink-dim: #9c8f73; --ink-faint: #6b6149;
+  --accent: #e8a33d; --accent-ink: #1a1305;
+  --rec: #d14b3d; --go: #7fa86b; --play: #5b8fa8;
+}
+[data-theme="phosphor"] {
+  --bg: #0a0f0a; --surface: #10180f; --surface-raised: #172217;
+  --line: #233322; --line-strong: #2f452d;
+  --tape: #c8f0c0; --ink-dim: #7fa878; --ink-faint: #527550;
+  --accent: #5fe066; --accent-ink: #06140a;
+  --rec: #e05f4f; --go: #5fe066; --play: #6cc6e0;
+}
+[data-theme="darkroom"] {
+  --bg: #120a0a; --surface: #1c1010; --surface-raised: #281616;
+  --line: #3a1f1f; --line-strong: #4a2828;
+  --tape: #f0d8cc; --ink-dim: #a88078; --ink-faint: #765651;
+  --accent: #e0654a; --accent-ink: #1a0805;
+  --rec: #ff5c4d; --go: #8fb86f; --play: #7a9bb8;
+}
+[data-theme="slate"] {
+  --bg: #13161a; --surface: #1b1f25; --surface-raised: #242931;
+  --line: #323943; --line-strong: #424b57;
+  --tape: #e4e8ec; --ink-dim: #8b95a3; --ink-faint: #5c6672;
+  --accent: #5b9bd8; --accent-ink: #0a1620;
+  --rec: #d8634f; --go: #6fb88a; --play: #5b9bd8;
+}
+[data-theme="paper"] {
+  --bg: #f4f0e6; --surface: #ffffff; --surface-raised: #fbf8f0;
+  --line: #ddd5c2; --line-strong: #c9bea4;
+  --tape: #211d14; --ink-dim: #6b6353; --ink-faint: #9b9384;
+  --accent: #b5742a; --accent-ink: #fff9f0;
+  --rec: #b8392a; --go: #4a7a3d; --play: #2f6a8c;
+}
+
+* { box-sizing: border-box; }
+html { color-scheme: dark; }
+[data-theme="paper"] { color-scheme: light; }
+
+body {
+  margin: 0; min-height: 100vh;
+  background: var(--bg); color: var(--tape);
+  font-family: var(--f-body); font-size: 13.5px; line-height: 1.5;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+a { color: var(--accent); }
+::selection { background: var(--accent); color: var(--accent-ink); }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 5px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── TOP BAR ── */
+header {
+  position: sticky; top: 0; z-index: 20;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+}
+.header-main {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 22px 10px;
+}
+.wordmark {
+  display: flex; align-items: baseline; gap: 10px;
+  font-family: var(--f-display); font-weight: 700; font-size: 19px;
+  letter-spacing: 0.5px; text-transform: uppercase; color: var(--tape);
+}
+.wordmark .rec-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--go); box-shadow: 0 0 8px var(--go); flex-shrink: 0;
+}
+.wordmark .rec-dot.offline { background: var(--rec); box-shadow: 0 0 8px var(--rec); }
+.wordmark small {
+  font-family: var(--f-body); font-weight: 400; text-transform: none;
+  font-size: 11px; color: var(--ink-faint); letter-spacing: 0;
+}
+.header-right { display: flex; align-items: center; gap: 10px; }
+
+.theme-picker { position: relative; }
+.theme-btn {
+  background: var(--surface); border: 1px solid var(--line);
+  color: var(--ink-dim); border-radius: var(--radius);
+  padding: 7px 12px; font-family: var(--f-body); font-size: 11px;
+  cursor: pointer; display: flex; align-items: center; gap: 6px;
+}
+.theme-btn:hover { border-color: var(--accent); color: var(--tape); }
+.theme-swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+.theme-menu {
+  display: none; position: absolute; right: 0; top: calc(100% + 6px);
+  background: var(--surface-raised); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); padding: 6px; min-width: 168px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 50;
+}
+.theme-menu.open { display: block; }
+.theme-option {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 12px; color: var(--ink-dim);
+  background: transparent; border: none; width: 100%; text-align: left; font-family: var(--f-body);
+}
+.theme-option:hover { background: var(--surface); color: var(--tape); }
+.theme-option.active { color: var(--accent); }
+.theme-option .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+.btn-logout {
+  background: transparent; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 7px 13px; font-family: var(--f-body); font-size: 11px; cursor: pointer;
+}
+.btn-logout:hover { color: var(--rec); border-color: var(--rec); }
+
+/* ── SESSION STATS BAR ── */
+.stats-bar {
+  display: flex; gap: 0; padding: 0 22px;
+  border-top: 1px solid var(--line); overflow-x: auto;
+}
+.stats-cell {
+  flex: 1; min-width: 110px; padding: 8px 16px 8px 0;
+  border-right: 1px solid var(--line);
+  display: flex; align-items: center; gap: 8px;
+}
+.stats-cell:first-child { padding-left: 0; }
+.stats-cell:last-child { border-right: none; }
+.stats-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.stats-dot.active { background: var(--play); }
+.stats-dot.queued { background: var(--ink-dim); }
+.stats-dot.done { background: var(--go); }
+.stats-dot.failed { background: var(--rec); }
+.stats-dot.total { background: var(--ink-faint); }
+.stats-label {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--ink-faint);
+}
+.stats-value {
+  font-family: var(--f-display); font-weight: 600; font-size: 15px;
+  color: var(--tape); margin-left: auto;
+}
+
+/* ── LAYOUT ── */
+.deck {
+  display: grid; grid-template-columns: 380px 1fr; gap: 0;
+  max-width: 1400px; margin: 0 auto; min-height: calc(100vh - 96px);
+}
+@media (max-width: 920px) { .deck { grid-template-columns: 1fr; } }
+
+.rail { border-right: 1px solid var(--line); padding: 22px; }
+@media (max-width: 920px) { .rail { border-right: none; border-bottom: 1px solid var(--line); } }
+
+.rail-tabs {
+  display: flex; gap: 0; border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden; margin-bottom: 20px;
+}
+.rail-tab {
+  flex: 1; padding: 9px 0; text-align: center;
+  background: transparent; border: none; color: var(--ink-dim);
+  font-family: var(--f-display); font-weight: 600; font-size: 11.5px;
+  letter-spacing: 0.8px; text-transform: uppercase; cursor: pointer;
+  border-right: 1px solid var(--line);
+}
+.rail-tab:last-child { border-right: none; }
+.rail-tab.active { background: var(--accent); color: var(--accent-ink); }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ── FORMS ── */
+.field { margin-bottom: 15px; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.field-label-row {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 6px;
+}
+.field-label-row label {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px;
+  color: var(--ink-faint); margin: 0;
+}
+
+label {
+  display: block; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: 0.8px; color: var(--ink-faint); margin-bottom: 6px;
+}
+
+input[type="text"], input[type="number"], input[type="password"],
+select, textarea {
+  width: 100%; padding: 9px 11px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius); color: var(--tape);
+  font-size: 12.5px; font-family: var(--f-body);
+}
+textarea { resize: vertical; min-height: 88px; font-family: var(--f-mono); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input::placeholder, textarea::placeholder { color: var(--ink-faint); }
+
+select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
+                     linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
+  background-position: calc(100% - 16px) center, calc(100% - 11px) center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat; padding-right: 32px;
+}
+
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 40px; }
+.pw-toggle {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: none; cursor: pointer;
+  color: var(--ink-faint); padding: 6px 8px; font-family: var(--f-body);
+  font-size: 10.5px; letter-spacing: 0.5px; text-transform: uppercase; border-radius: var(--radius-sm);
+}
+.pw-toggle:hover { color: var(--accent); }
+
+.checkrow { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+.checkrow label {
+  margin: 0; color: var(--tape); text-transform: none;
+  letter-spacing: 0; font-size: 12.5px; cursor: pointer;
+}
+.checkrow input[type="checkbox"] {
+  accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; flex-shrink: 0;
+}
+
+.hint { color: var(--ink-faint); font-size: 10.5px; margin-top: 4px; line-height: 1.4; }
+
+/* ── INFO TOOLTIP BUTTON ── */
+.info-btn {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: transparent; border: 1px solid var(--line-strong);
+  color: var(--ink-faint); font-size: 9px; font-family: var(--f-display);
+  font-weight: 700; cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; flex-shrink: 0;
+  padding: 0; line-height: 1;
+  position: relative;
+}
+.info-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.info-tooltip {
+  display: none; position: absolute; z-index: 100;
+  bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: var(--surface-raised); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); padding: 10px 12px;
+  font-size: 11.5px; color: var(--tape); line-height: 1.5;
+  width: 220px; white-space: normal; font-family: var(--f-body);
+  text-transform: none; letter-spacing: 0; font-weight: 400;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  pointer-events: none;
+}
+.info-btn:hover .info-tooltip,
+.info-btn:focus .info-tooltip { display: block; }
+
+/* ── OPTIONAL SECTION ── */
+details.optional {
+  margin: 4px 0 15px; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px;
+}
+details.optional summary {
+  cursor: pointer; color: var(--ink-dim); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.6px; user-select: none;
+  font-family: var(--f-display); font-weight: 600; list-style: none;
+  display: flex; align-items: center; gap: 6px;
+}
+details.optional summary::before { content: '▸'; font-size: 9px; transition: transform 0.15s; }
+details.optional[open] summary::before { transform: rotate(90deg); }
+details.optional[open] summary { margin-bottom: 12px; color: var(--accent); }
+details.optional summary::-webkit-details-marker { display: none; }
+
+.section-note {
+  font-size: 10.5px; color: var(--ink-faint); margin-bottom: 12px; line-height: 1.4;
+}
+
+/* ── SUBMIT BUTTON ── */
+.btn-go {
+  width: 100%; background: var(--accent); color: var(--accent-ink); border: none;
+  border-radius: var(--radius); padding: 13px;
+  font-family: var(--f-display); font-weight: 700; font-size: 13px;
+  text-transform: uppercase; letter-spacing: 1px; cursor: pointer;
+}
+.btn-go:hover { filter: brightness(1.08); }
+.btn-go:disabled { opacity: 0.45; cursor: default; }
+
+.form-msg { font-size: 11.5px; margin-top: 10px; min-height: 15px; }
+.form-msg.error { color: var(--rec); }
+.form-msg.ok { color: var(--go); }
+
+/* ── JOBS PANEL ── */
+.reel { padding: 22px; }
+.reel-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;
+}
+.reel-title {
+  font-family: var(--f-display); font-weight: 700; font-size: 13px;
+  text-transform: uppercase; letter-spacing: 1.2px; color: var(--ink-dim);
+}
+.btn-clear {
+  background: transparent; border: 1px solid var(--line); color: var(--ink-faint);
+  padding: 6px 12px; border-radius: var(--radius); font-family: var(--f-body);
+  font-size: 10.5px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.btn-clear:hover { border-color: var(--accent); color: var(--accent); }
+
+.empty-state {
+  text-align: center; padding: 50px 20px; color: var(--ink-faint);
+  border: 1px dashed var(--line); border-radius: var(--radius-lg);
+}
+.empty-state .glyph { font-size: 26px; margin-bottom: 10px; opacity: 0.5; }
+.empty-state .sub { font-size: 11px; margin-top: 4px; }
+
+/* ── JOB CARD ── */
+.job-card {
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 10px;
+}
+.job-card.is-active { border-color: var(--line-strong); }
+.job-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.job-meta { min-width: 0; flex: 1; }
+.job-url {
+  font-size: 12.5px; color: var(--tape); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.job-sub {
+  font-size: 10.5px; color: var(--ink-faint); margin-top: 4px;
+  display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+}
+
+/* ── STATUS BADGE ── */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px 2px 6px; border-radius: 10px; font-size: 9.5px;
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+  font-family: var(--f-body);
+}
+.badge .dot { width: 5px; height: 5px; border-radius: 50%; }
+.badge.queued { background: var(--surface-raised); color: var(--ink-dim); }
+.badge.queued .dot { background: var(--ink-dim); }
+.badge.running { background: color-mix(in srgb, var(--play) 18%, transparent); color: var(--play); }
+.badge.running .dot { background: var(--play); }
+.badge.uploading { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.badge.uploading .dot { background: var(--accent); }
+.badge.done { background: color-mix(in srgb, var(--go) 18%, transparent); color: var(--go); }
+.badge.done .dot { background: var(--go); }
+.badge.error { background: color-mix(in srgb, var(--rec) 18%, transparent); color: var(--rec); }
+.badge.error .dot { background: var(--rec); }
+.badge.cancelled { background: var(--surface-raised); color: var(--ink-faint); }
+.badge.cancelled .dot { background: var(--ink-faint); }
+
+.job-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.icon-btn {
+  background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
+  border-radius: var(--radius); padding: 6px 11px; font-size: 10.5px; cursor: pointer;
+  font-family: var(--f-body); white-space: nowrap; text-transform: uppercase; letter-spacing: 0.4px;
+}
+.icon-btn:hover { color: var(--tape); border-color: var(--accent); }
+.icon-btn.danger:hover { color: var(--rec); border-color: var(--rec); }
+.icon-btn.go { color: var(--go); border-color: var(--go); }
+.icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ── VU-METER PROGRESS STRIP ── */
+.meter-strip {
+  display: flex; gap: 2px; height: 10px; margin-top: 11px;
+  border-radius: 2px; overflow: hidden;
+}
+.meter-seg { flex: 1; background: var(--surface-raised); border-radius: 1px; }
+.meter-seg.filled { background: var(--accent); }
+.meter-seg.filled.hot { background: var(--rec); }
+.meter-strip.indeterminate .meter-seg {
+  animation: vu-pulse 1.1s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 0.04s);
+  background: var(--accent); opacity: 0.25;
+}
+@keyframes vu-pulse { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.85; } }
+
+/* ── JOB STATS ROW ── */
+.job-stats {
+  display: flex; gap: 14px; font-size: 10.5px;
+  color: var(--ink-faint); margin-top: 7px; flex-wrap: wrap;
+}
+.job-stats .pct { color: var(--accent); font-weight: 600; }
+.job-stats .speed-val { color: var(--tape); }
+
+/* ── FILE INFO (clean, human-readable) ── */
+.job-file {
+  margin-top: 6px; font-size: 11px; color: var(--ink-dim);
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.job-file-name {
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-size {
+  color: var(--ink-faint); font-size: 10.5px; white-space: nowrap;
+}
+
+.job-error {
+  margin-top: 8px; padding: 8px 10px;
+  background: color-mix(in srgb, var(--rec) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rec) 30%, transparent);
+  border-radius: var(--radius); color: var(--rec); font-size: 11.5px; line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meter-strip.indeterminate .meter-seg { animation: none; opacity: 0.6; }
+}
+</style>
+</head>
+<body data-theme="amber">
+
+<header>
+  <div class="header-main">
+    <div class="wordmark">
+      <span class="rec-dot" id="rec-dot"></span>
+      DECK <small id="version-text">connecting…</small>
+    </div>
+    <div class="header-right">
+      <div class="theme-picker">
+        <button class="theme-btn" id="theme-btn" aria-label="Change theme">
+          <span class="theme-swatch"></span> Theme
+        </button>
+        <div class="theme-menu" id="theme-menu">
+          <button class="theme-option active" data-theme="amber"><span class="dot" style="background:#e8a33d"></span>Reel Amber</button>
+          <button class="theme-option" data-theme="phosphor"><span class="dot" style="background:#5fe066"></span>Phosphor</button>
+          <button class="theme-option" data-theme="darkroom"><span class="dot" style="background:#e0654a"></span>Darkroom</button>
+          <button class="theme-option" data-theme="slate"><span class="dot" style="background:#5b9bd8"></span>Slate</button>
+          <button class="theme-option" data-theme="paper"><span class="dot" style="background:#b5742a"></span>Paper</button>
+        </div>
+      </div>
+      <button class="btn-logout" id="logout-btn">Log out</button>
+    </div>
+  </div>
+
+  <!-- Session summary — persists across Clear Finished, resets on logout -->
+  <div class="stats-bar">
+    <div class="stats-cell">
+      <span class="stats-dot active"></span>
+      <span class="stats-label">Running</span>
+      <span class="stats-value" id="stat-active">0</span>
+    </div>
+    <div class="stats-cell">
+      <span class="stats-dot queued"></span>
+      <span class="stats-label">Queued</span>
+      <span class="stats-value" id="stat-queued">0</span>
+    </div>
+    <div class="stats-cell">
+      <span class="stats-dot done"></span>
+      <span class="stats-label">Done</span>
+      <span class="stats-value" id="stat-done">0</span>
+    </div>
+    <div class="stats-cell">
+      <span class="stats-dot failed"></span>
+      <span class="stats-label">Failed</span>
+      <span class="stats-value" id="stat-error">0</span>
+    </div>
+    <div class="stats-cell">
+      <span class="stats-dot total"></span>
+      <span class="stats-label">Total</span>
+      <span class="stats-value" id="stat-total">0</span>
+    </div>
+  </div>
+</header>
+
+<div class="deck">
+
+  <!-- ====== LEFT PANEL — download form ====== -->
+  <aside class="rail">
+    <div class="rail-tabs">
+      <button class="rail-tab active" data-tab="single">Single video</button>
+      <button class="rail-tab" data-tab="batch">Multiple videos</button>
+    </div>
+
+    <!-- ── SINGLE ── -->
+    <div class="tab-panel active" id="tab-single">
+      <form id="single-form">
+
+        <div class="field">
+          <div class="field-label-row">
+            <label for="s-url">Video link</label>
+            <button type="button" class="info-btn" tabindex="-1" aria-label="What goes here">i
+              <span class="info-tooltip">Paste the full link to the video or playlist you want to download. Works with YouTube, Vimeo, Twitter/X, Facebook, and hundreds of other sites.</span>
+            </button>
+          </div>
+          <input type="text" id="s-url" placeholder="https://www.youtube.com/watch?v=…" required>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-mode">Save as</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="What is Save As">i
+                <span class="info-tooltip">MP4 saves the video with picture and sound. MP3 saves audio only — great for music. Choose Playlist to download all videos in a playlist at once.</span>
+              </button>
+            </div>
+            <select id="s-mode">
+              <option value="mp4">MP4 — video</option>
+              <option value="mp3">MP3 — audio only</option>
+              <option value="playlist">Playlist — all videos</option>
+              <option value="playlist_range">Playlist — a range</option>
+              <option value="facebook">Facebook video</option>
+              <option value="x">X / Twitter video</option>
+              <option value="custom">Other website</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-resolution">Quality</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="What is Quality">i
+                <span class="info-tooltip">Higher quality = bigger file size. 1080p is a good balance for most screens. "Best available" picks whatever is highest on the site.</span>
+              </button>
+            </div>
+            <select id="s-resolution">
+              <option value="">Best available</option>
+              <option value="2160">4K (very large file)</option>
+              <option value="1080">1080p (HD)</option>
+              <option value="720">720p (smaller)</option>
+              <option value="480">480p (small)</option>
+              <option value="360">360p (tiny)</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="s-range-row" class="field-row" style="display:none;">
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-range-start">Start at video #</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="What is Start at">i
+                <span class="info-tooltip">The playlist position to start from. For example, enter 3 to skip the first two videos and begin at the third.</span>
+              </button>
+            </div>
+            <input type="number" id="s-range-start" min="1" placeholder="e.g. 1">
+          </div>
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-range-end">Stop at video #</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="What is Stop at">i
+                <span class="info-tooltip">The playlist position to stop at. For example, enter 10 to download only videos 1 through 10.</span>
+              </button>
+            </div>
+            <input type="number" id="s-range-end" min="1" placeholder="e.g. 10">
+          </div>
+        </div>
+
+        <div class="checkrow">
+          <input type="checkbox" id="s-thumb" checked>
+          <label for="s-thumb">Save cover art inside the file</label>
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="s-meta" checked>
+          <label for="s-meta">Save title, artist and other info inside the file</label>
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="s-archive" checked>
+          <label for="s-archive">Skip videos already downloaded before</label>
+        </div>
+
+        <details class="optional" id="s-optional">
+          <summary>More options</summary>
+          <p class="section-note">These are useful in specific situations. Most people can leave this section alone.</p>
+
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-subfolder">Save into a folder</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="About folder">i
+                <span class="info-tooltip">Organise your downloads into a sub-folder. Type any name — the folder will be created automatically. Leave blank to save into the default location.</span>
+              </button>
+            </div>
+            <input type="text" id="s-subfolder" placeholder="e.g. Study Videos">
+          </div>
+
+          <div class="checkrow">
+            <input type="checkbox" id="s-search">
+            <label for="s-search">Search YouTube instead of using a link</label>
+          </div>
+          <div id="s-search-opts" style="display:none; margin-left: 24px; margin-bottom: 12px;">
+            <div class="field-row">
+              <div class="field">
+                <div class="field-label-row">
+                  <label for="s-search-count">Number of results to try</label>
+                  <button type="button" class="info-btn" tabindex="-1" aria-label="Search results">i
+                    <span class="info-tooltip">How many YouTube search results to look through before picking the best match. 5 is usually enough.</span>
+                  </button>
+                </div>
+                <input type="number" id="s-search-count" value="5" min="1">
+              </div>
+              <div class="field">
+                <div class="field-label-row">
+                  <label for="s-filter">Skip results containing</label>
+                  <button type="button" class="info-btn" tabindex="-1" aria-label="Skip results">i
+                    <span class="info-tooltip">Words to avoid in search results — useful for skipping lyric videos or covers. Separate words with a pipe "|" symbol. Leave blank to accept any result.</span>
+                  </button>
+                </div>
+                <input type="text" id="s-filter" value="lyrics|visualizer|karaoke">
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="field-label-row">
+              <label for="s-useragent">Pretend to be a specific browser</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="Browser identity">i
+                <span class="info-tooltip">Some websites block downloads unless they think a real browser is visiting. This lets you tell the site "I'm using Chrome on Windows" so it doesn't block you. Leave blank to use the default.</span>
+              </button>
+            </div>
+            <select id="s-useragent">
+              <option value="">Default (works for most sites)</option>
+              <option value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36">Chrome on Windows</option>
+              <option value="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36">Chrome on Mac</option>
+              <option value="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1">Safari on iPhone</option>
+              <option value="custom">Custom (type your own below)</option>
+            </select>
+          </div>
+          <div class="field" id="s-useragent-custom-field" style="display:none;">
+            <input type="text" id="s-useragent-custom" placeholder="Paste a User-Agent string here">
+          </div>
+
+
+        </details>
+
+        <button type="submit" class="btn-go" id="s-submit">Download</button>
+        <div class="form-msg" id="s-msg"></div>
+      </form>
+    </div>
+
+    <!-- ── BATCH ── -->
+    <div class="tab-panel" id="tab-batch">
+      <form id="batch-form">
+
+        <div class="field">
+          <div class="field-label-row">
+            <label for="b-urls">Video links — one per line</label>
+            <button type="button" class="info-btn" tabindex="-1" aria-label="How to add links">i
+              <span class="info-tooltip">Paste one link per line. You can add a # at the start of any line to skip it without deleting it.</span>
+            </button>
+          </div>
+          <textarea id="b-urls" placeholder="https://youtube.com/watch?v=abc&#10;https://youtube.com/watch?v=xyz&#10;# https://skip-this-one.com" required></textarea>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="b-mode">Save as</label>
+            <select id="b-mode">
+              <option value="mp4">MP4 — video</option>
+              <option value="mp3">MP3 — audio only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="b-resolution">Quality</label>
+            <select id="b-resolution">
+              <option value="">Best available</option>
+              <option value="2160">4K (very large file)</option>
+              <option value="1080">1080p (HD)</option>
+              <option value="720">720p (smaller)</option>
+              <option value="480">480p (small)</option>
+              <option value="360">360p (tiny)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="checkrow">
+          <input type="checkbox" id="b-thumb" checked>
+          <label for="b-thumb">Save cover art inside each file</label>
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="b-meta" checked>
+          <label for="b-meta">Save title, artist and other info inside each file</label>
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="b-archive" checked>
+          <label for="b-archive">Skip videos already downloaded before</label>
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="b-zip">
+          <label for="b-zip">Bundle everything into a single ZIP when done</label>
+        </div>
+
+        <details class="optional" id="b-optional">
+          <summary>More options</summary>
+          <p class="section-note">These are useful in specific situations. Most people can leave this section alone.</p>
+
+          <div class="field">
+            <div class="field-label-row">
+              <label for="b-subfolder">Save into a folder</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="About folder">i
+                <span class="info-tooltip">Organise your batch into a sub-folder. If "Bundle into ZIP" is on, a folder name will be generated automatically if you leave this blank.</span>
+              </button>
+            </div>
+            <input type="text" id="b-subfolder" placeholder="e.g. Music Collection">
+          </div>
+
+          <div class="field" id="b-zippass-field" style="display:none;">
+            <div class="field-label-row">
+              <label for="b-zippass">ZIP password (optional)</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="ZIP password">i
+                <span class="info-tooltip">Lock the ZIP file with a password. Anyone who wants to open it will need to enter this password. Leave blank for no password.</span>
+              </button>
+            </div>
+            <div class="pw-wrap">
+              <input type="password" id="b-zippass" placeholder="Leave blank for no password">
+              <button type="button" class="pw-toggle" data-target="b-zippass">Show</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="field-label-row">
+              <label for="b-useragent">Pretend to be a specific browser</label>
+              <button type="button" class="info-btn" tabindex="-1" aria-label="Browser identity">i
+                <span class="info-tooltip">Some websites block downloads unless they think a real browser is visiting. Choose one here if you're getting blocked. Leave blank for most sites.</span>
+              </button>
+            </div>
+            <select id="b-useragent">
+              <option value="">Default (works for most sites)</option>
+              <option value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36">Chrome on Windows</option>
+              <option value="Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36">Chrome on Mac</option>
+              <option value="custom">Custom (type your own)</option>
+            </select>
+          </div>
+          <div class="field" id="b-useragent-custom-field" style="display:none;">
+            <input type="text" id="b-useragent-custom" placeholder="Paste a User-Agent string here">
+          </div>
+
+
+        </details>
+
+        <button type="submit" class="btn-go" id="b-submit">Start downloading</button>
+        <div class="form-msg" id="b-msg"></div>
+      </form>
+    </div>
+  </aside>
+
+  <!-- ====== RIGHT PANEL — jobs list ====== -->
+  <main class="reel">
+    <div class="reel-header">
+      <span class="reel-title">Downloads</span>
+      <button class="btn-clear" id="clear-finished-btn">Clear finished</button>
+    </div>
+    <div id="jobs-list">
+      <div class="empty-state">
+        <div class="glyph">○</div>
+        No downloads yet.
+        <div class="sub">Paste a link on the left and hit Download.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+// ── Theme picker ──
+const THEMES = {
+  amber: '#e8a33d', phosphor: '#5fe066', darkroom: '#e0654a', slate: '#5b9bd8', paper: '#b5742a',
+};
+const themeBtn = document.getElementById('theme-btn');
+const themeMenu = document.getElementById('theme-menu');
+const themeSwatch = themeBtn.querySelector('.theme-swatch');
+
+themeBtn.addEventListener('click', (e) => { e.stopPropagation(); themeMenu.classList.toggle('open'); });
+document.addEventListener('click', () => themeMenu.classList.remove('open'));
+document.querySelectorAll('.theme-option').forEach(opt => {
+  opt.addEventListener('click', () => {
+    const theme = opt.dataset.theme;
+    document.body.setAttribute('data-theme', theme);
+    themeSwatch.style.background = THEMES[theme];
+    document.querySelectorAll('.theme-option').forEach(o => o.classList.toggle('active', o === opt));
+    themeMenu.classList.remove('open');
+  });
+});
+
+// ── State ──
+let pollTimer = null;
+const POLL_INTERVAL_MS = 1500;
+const downloadingUrls = new Set();
+
+// Session-lifetime counters — survive Clear Finished, reset on logout
+let sessionDone = 0;
+let sessionFailed = 0;
+
+function el(id) { return document.getElementById(id); }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (res.status === 401) { window.location.href = '/login'; throw new Error('Not logged in'); }
+  return res;
+}
+
+function escapeHtml(str) {
+  const d = document.createElement('div'); d.textContent = str ?? ''; return d.innerHTML;
+}
+
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+  catch { return ''; }
+}
+
+function fmtMode(mode) {
+  const map = {
+    mp4: 'MP4', mp3: 'MP3', playlist: 'Playlist',
+    playlist_range: 'Playlist range', facebook: 'Facebook',
+    x: 'X/Twitter', custom: 'Custom', zip_task: 'ZIP'
+  };
+  return map[mode] || mode;
+}
+
+// Human-readable error: strip yt-dlp's noisy prefix if present
+function cleanError(raw) {
+  if (!raw) return '';
+  return raw
+    .replace(/^(ERROR|DownloadError|youtube_dl\.utils\.DownloadError):\s*/i, '')
+    .replace(/^\[.*?\]\s*/, '')
+    .trim();
+}
+
+// ── Tab switching ──
+document.querySelectorAll('.rail-tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.rail-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    el('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Conditional fields ──
+el('s-mode').addEventListener('change', () => {
+  el('s-range-row').style.display = el('s-mode').value === 'playlist_range' ? 'grid' : 'none';
+});
+
+el('s-search').addEventListener('change', () => {
+  el('s-search-opts').style.display = el('s-search').checked ? 'block' : 'none';
+});
+
+el('b-zip').addEventListener('change', () => {
+  el('b-zippass-field').style.display = el('b-zip').checked ? 'block' : 'none';
+});
+
+// User-agent custom field toggles
+el('s-useragent').addEventListener('change', () => {
+  el('s-useragent-custom-field').style.display = el('s-useragent').value === 'custom' ? 'block' : 'none';
+});
+el('b-useragent').addEventListener('change', () => {
+  el('b-useragent-custom-field').style.display = el('b-useragent').value === 'custom' ? 'block' : 'none';
+});
+
+// Cookies custom field toggles
+
+
+// Password show/hide
+document.querySelectorAll('.pw-toggle').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = el(btn.dataset.target);
+    const showing = target.type === 'text';
+    target.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? 'Show' : 'Hide';
+  });
+});
+
+// ── Logout ──
+el('logout-btn').addEventListener('click', async () => {
+  try { await fetch('/api/logout', { method: 'POST' }); } finally { window.location.href = '/login'; }
+});
+
+// ── Health ──
+async function checkHealth() {
+  try {
+    const res = await fetch('/api/health');
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    el('version-text').textContent = `v${data.yt_dlp_version}`;
+    el('rec-dot').classList.remove('offline');
+  } catch {
+    el('version-text').textContent = 'server offline';
+    el('rec-dot').classList.add('offline');
+  }
+}
+
+// ── Helper for resolving user-agent from select+custom combo ──
+function resolveUserAgent(selectId, customId) {
+  const v = el(selectId).value;
+  if (!v || v === '') return null;
+  if (v === 'custom') return el(customId).value.trim() || null;
+  return v;
+}
+
+
+// ── Single submit ──
+el('single-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = el('s-msg'); const btn = el('s-submit');
+  msg.textContent = ''; msg.className = 'form-msg';
+  btn.disabled = true; btn.textContent = 'Starting…';
+
+  const payload = {
+    url: el('s-url').value.trim(),
+    mode: el('s-mode').value,
+    resolution: el('s-resolution').value ? parseInt(el('s-resolution').value, 10) : null,
+    embed_thumbnail: el('s-thumb').checked,
+    add_metadata: el('s-meta').checked,
+    use_archive: el('s-archive').checked,
+    subfolder: el('s-subfolder').value.trim() || null,
+    search_first: el('s-search').checked,
+    search_count: parseInt(el('s-search-count').value, 10) || 5,
+    filter_keywords: el('s-filter').value.trim() || null,
+    user_agent: resolveUserAgent('s-useragent', 's-useragent-custom'),
+    raw_args: null,
+  };
+  if (payload.mode === 'playlist_range') {
+    payload.playlist_start = el('s-range-start').value ? parseInt(el('s-range-start').value, 10) : null;
+    payload.playlist_end = el('s-range-end').value ? parseInt(el('s-range-end').value, 10) : null;
+  }
+
+  try {
+    const res = await api('/api/jobs', { method: 'POST', body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || `Something went wrong (${res.status})`);
+    }
+    msg.textContent = 'Download queued — check the list on the right.';
+    msg.className = 'form-msg ok';
+    el('s-url').value = '';
+    await refreshJobs();
+  } catch (err) {
+    msg.textContent = err.message || 'Something went wrong.';
+    msg.className = 'form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Download';
+  }
+});
+
+// ── Batch submit ──
+el('batch-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = el('b-msg'); const btn = el('b-submit');
+  msg.textContent = ''; msg.className = 'form-msg';
+  btn.disabled = true; btn.textContent = 'Starting…';
+
+  const payload = {
+    urls: el('b-urls').value,
+    mode: el('b-mode').value,
+    resolution: el('b-resolution').value ? parseInt(el('b-resolution').value, 10) : null,
+    embed_thumbnail: el('b-thumb').checked,
+    add_metadata: el('b-meta').checked,
+    use_archive: el('b-archive').checked,
+    subfolder: el('b-subfolder').value.trim() || null,
+    user_agent: resolveUserAgent('b-useragent', 'b-useragent-custom'),
+    zip_when_done: el('b-zip').checked,
+    zip_password: el('b-zippass').value || null,
+  };
+
+  try {
+    const res = await api('/api/jobs/batch', { method: 'POST', body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      throw new Error(errBody.detail || `Something went wrong (${res.status})`);
+    }
+    const data = await res.json();
+    msg.textContent = `${data.count} download${data.count !== 1 ? 's' : ''} queued.`;
+    msg.className = 'form-msg ok';
+    el('b-urls').value = '';
+    await refreshJobs();
+  } catch (err) {
+    msg.textContent = err.message || 'Something went wrong.';
+    msg.className = 'form-msg error';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Start downloading';
+  }
+});
+
+// ── Clear finished (does NOT reset session counters) ──
+el('clear-finished-btn').addEventListener('click', async () => {
+  el('clear-finished-btn').disabled = true;
+  try { await api('/api/jobs/clear-finished', { method: 'DELETE' }); await refreshJobs(); }
+  catch (err) { console.error(err); }
+  finally { el('clear-finished-btn').disabled = false; }
+});
+
+// ── Job actions ──
+async function cancelOrDeleteJob(jobId) {
+  try { await api(`/api/jobs/${jobId}`, { method: 'DELETE' }); await refreshJobs(); }
+  catch (err) { console.error(err); }
+}
+async function retryJob(jobId) {
+  try { await api(`/api/jobs/${jobId}/retry`, { method: 'PUT' }); await refreshJobs(); }
+  catch (err) { console.error(err); }
+}
+async function downloadJob(jobId, btnEl) {
+  if (downloadingUrls.has(jobId)) return;
+  downloadingUrls.add(jobId);
+  const original = btnEl.textContent;
+  btnEl.textContent = '…'; btnEl.disabled = true;
+  try {
+    const res = await api(`/api/jobs/${jobId}/download`);
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'File not ready'); }
+    const data = await res.json();
+    window.open(data.url, '_blank');
+  } catch (err) { console.error(err); }
+  finally {
+    downloadingUrls.delete(jobId);
+    btnEl.textContent = original; btnEl.disabled = false;
+  }
+}
+
+// ── Progress meter ──
+const METER_SEGMENTS = 24;
+function renderMeterStrip(job) {
+  const status = job.status;
+  const isActive = status === 'queued' || status === 'running' || status === 'uploading';
+  if (!isActive) return '';
+
+  if (status === 'queued' || (status === 'running' && job.progress <= 0)) {
+    let segs = '';
+    for (let i = 0; i < METER_SEGMENTS; i++) segs += `<div class="meter-seg" style="--i:${i}"></div>`;
+    return `<div class="meter-strip indeterminate">${segs}</div>`;
+  }
+  if (status === 'uploading') {
+    let segs = '';
+    for (let i = 0; i < METER_SEGMENTS; i++) segs += `<div class="meter-seg" style="--i:${i}"></div>`;
+    return `<div class="meter-strip indeterminate">${segs}</div>`;
+  }
+
+  const filledCount = Math.round((job.progress / 100) * METER_SEGMENTS);
+  let segs = '';
+  for (let i = 0; i < METER_SEGMENTS; i++) {
+    const isHot = i >= METER_SEGMENTS - 2;
+    const filled = i < filledCount;
+    segs += `<div class="meter-seg${filled ? ' filled' : ''}${filled && isHot ? ' hot' : ''}"></div>`;
+  }
+  return `<div class="meter-strip">${segs}</div>`;
+}
+
+// ── Status label ──
+function statusLabel(status) {
+  const map = {
+    queued: 'Waiting…',
+    running: 'Downloading',
+    uploading: 'Saving to cloud…',
+    done: 'Done',
+    error: 'Failed',
+    cancelled: 'Cancelled',
+  };
+  return map[status] || status;
+}
+
+// ── Job card ──
+function renderJobCard(job) {
+  const status = job.status;
+  const isActive = status === 'queued' || status === 'running' || status === 'uploading';
+
+  // Progress stats — only show what's actually useful
+  let statsHtml = '';
+  const parts = [];
+  if (status === 'running') {
+    if (job.speed) parts.push(`<span class="speed-val">${escapeHtml(job.speed)}</span>`);
+    if (job.eta && job.eta !== 'Unknown') parts.push(`${escapeHtml(job.eta)} left`);
+    if (job.progress > 0) parts.push(`<span class="pct">${Math.round(job.progress)}%</span>`);
+  }
+  if (status === 'uploading') {
+    parts.push('Uploading to storage…');
+  }
+  if (parts.length) statsHtml = `<div class="job-stats">${parts.map(p => `<span>${p}</span>`).join('')}</div>`;
+
+  // File info — human-readable, only when available and meaningful
+  let fileHtml = '';
+  if (job.filename && (status === 'done' || status === 'running' || status === 'uploading')) {
+    const sizeStr = (job.size_downloaded && job.size_total && job.size_downloaded !== job.size_total)
+      ? `${job.size_downloaded} of ${job.size_total}`
+      : (job.size_total || job.size_downloaded || '');
+    fileHtml = `<div class="job-file">
+      <span class="job-file-name" title="${escapeHtml(job.filename)}">${escapeHtml(job.filename)}</span>
+      ${sizeStr ? `<span class="job-size">${escapeHtml(sizeStr)}</span>` : ''}
+    </div>`;
+  }
+
+  // Error — stripped of technical noise
+  let errorHtml = '';
+  if (job.error) {
+    const msg = cleanError(job.error);
+    errorHtml = `<div class="job-error">${escapeHtml(msg)}</div>`;
+  }
+
+  // Actions
+  const actions = [];
+  if (isActive) {
+    actions.push(`<button class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Cancel</button>`);
+  } else {
+    if (status === 'done' && job.download_ready) {
+      actions.push(`<button class="icon-btn go" onclick="downloadJob('${job.id}', this)">Download</button>`);
+    }
+    if (status === 'error' || status === 'cancelled') {
+      actions.push(`<button class="icon-btn" onclick="retryJob('${job.id}')">Retry</button>`);
+    }
+    actions.push(`<button class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Remove</button>`);
+  }
+
+  return `
+    <div class="job-card ${isActive ? 'is-active' : ''}" data-job-id="${job.id}">
+      <div class="job-top">
+        <div class="job-meta">
+          <div class="job-url" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>
+          <div class="job-sub">
+            <span class="badge ${status}"><span class="dot"></span>${statusLabel(status)}</span>
+            <span>${fmtMode(job.mode)}</span>
+            <span>${fmtTime(job.created_at)}</span>
+          </div>
+        </div>
+        <div class="job-actions">${actions.join('')}</div>
+      </div>
+      ${renderMeterStrip(job)}
+      ${statsHtml}
+      ${fileHtml}
+      ${errorHtml}
+    </div>`;
+}
+
+// ── Render all jobs, update session counters (never decrease done/failed) ──
+function renderJobs(jobs) {
+  const container = el('jobs-list');
+  if (!jobs.length) {
+    container.innerHTML = `
+      <div class="empty-state">
+        <div class="glyph">○</div>
+        No downloads yet.
+        <div class="sub">Paste a link on the left and hit Download.</div>
+      </div>`;
+  } else {
+    container.innerHTML = jobs.map(renderJobCard).join('');
+  }
+
+  // Live counts from server
+  let active = 0, queued = 0, done = 0, failed = 0;
+  for (const j of jobs) {
+    if (j.status === 'running' || j.status === 'uploading') active++;
+    else if (j.status === 'queued') queued++;
+    else if (j.status === 'done') done++;
+    else if (j.status === 'error') failed++;
+  }
+
+  // Session totals — ratchet upward only (survive Clear Finished)
+  if (done > sessionDone) sessionDone = done;
+  if (failed > sessionFailed) sessionFailed = failed;
+
+  el('stat-active').textContent = active;
+  el('stat-queued').textContent = queued;
+  el('stat-done').textContent = sessionDone;
+  el('stat-error').textContent = sessionFailed;
+  el('stat-total').textContent = sessionDone + sessionFailed + active + queued;
+}
+
+// ── Poll ──
+async function refreshJobs() {
+  try {
+    const res = await api('/api/jobs');
+    if (!res.ok) return;
+    renderJobs(await res.json());
+  } catch (err) { console.error(err); }
+}
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(refreshJobs, POLL_INTERVAL_MS);
+}
+
+// ── Init ──
+(async function init() {
+  try {
+    const res = await fetch('/api/auth/status');
+    const data = await res.json();
+    if (!data.logged_in) { window.location.href = '/login'; return; }
+  } catch { /* fall through */ }
+  checkHealth();
+  await refreshJobs();
+  startPolling();
+})();
+</script>
+</body>
+</html>

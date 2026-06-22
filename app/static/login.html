@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="midnight">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>yt-dlp Studio — Login</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ── Themes ─────────────────────────────────────────── */
+:root,
+[data-theme="midnight"] {
+  --bg:        #0d0f14;
+  --bg2:       #13161d;
+  --surface:   #1a1d26;
+  --surface2:  #20242f;
+  --border:    #2c3040;
+  --border2:   #363b4d;
+  --text:      #e8eaf0;
+  --text2:     #9096a8;
+  --text3:     #5a6070;
+  --accent:    #6c8aff;
+  --accent2:   #4d6bde;
+  --ok:        #4ade80;
+  --warn:      #fb923c;
+  --error:     #f87171;
+  --info:      #60a5fa;
+  --glow:      rgba(108,138,255,0.15);
+}
+[data-theme="slate"] {
+  --bg:        #0f1115;
+  --bg2:       #161a1f;
+  --surface:   #1e2329;
+  --surface2:  #252b33;
+  --border:    #2e3540;
+  --border2:   #3a4250;
+  --text:      #dce1ea;
+  --text2:     #8892a0;
+  --text3:     #505860;
+  --accent:    #38bdf8;
+  --accent2:   #0ea5e9;
+  --ok:        #34d399;
+  --warn:      #fbbf24;
+  --error:     #f87171;
+  --info:      #818cf8;
+  --glow:      rgba(56,189,248,0.12);
+}
+[data-theme="ember"] {
+  --bg:        #110c0a;
+  --bg2:       #181210;
+  --surface:   #211815;
+  --surface2:  #281e1a;
+  --border:    #3b2820;
+  --border2:   #4d3328;
+  --text:      #ede8e2;
+  --text2:     #a0897c;
+  --text3:     #5e4a3f;
+  --accent:    #ff7849;
+  --accent2:   #e85c2a;
+  --ok:        #86efac;
+  --warn:      #fcd34d;
+  --error:     #fca5a5;
+  --info:      #93c5fd;
+  --glow:      rgba(255,120,73,0.14);
+}
+[data-theme="forest"] {
+  --bg:        #090e0c;
+  --bg2:       #0e1511;
+  --surface:   #141d18;
+  --surface2:  #1a2520;
+  --border:    #233028;
+  --border2:   #2e3f34;
+  --text:      #dceee5;
+  --text2:     #7da88d;
+  --text3:     #456050;
+  --accent:    #4ade80;
+  --accent2:   #22c55e;
+  --ok:        #86efac;
+  --warn:      #fde68a;
+  --error:     #fca5a5;
+  --info:      #67e8f9;
+  --glow:      rgba(74,222,128,0.12);
+}
+[data-theme="ocean"] {
+  --bg:        #070d12;
+  --bg2:       #0d1520;
+  --surface:   #121e2e;
+  --surface2:  #18273c;
+  --border:    #1e3248;
+  --border2:   #2a4060;
+  --text:      #d0e8f0;
+  --text2:     #6898b0;
+  --text3:     #3a5a70;
+  --accent:    #22d3ee;
+  --accent2:   #06b6d4;
+  --ok:        #6ee7b7;
+  --warn:      #fcd34d;
+  --error:     #f87171;
+  --info:      #a5b4fc;
+  --glow:      rgba(34,211,238,0.12);
+}
+[data-theme="lavender"] {
+  --bg:        #0c0b14;
+  --bg2:       #12101e;
+  --surface:   #1a1828;
+  --surface2:  #211f33;
+  --border:    #2e2b44;
+  --border2:   #3c3858;
+  --text:      #e4e0f5;
+  --text2:     #9088c0;
+  --text3:     #5850a0;
+  --accent:    #c084fc;
+  --accent2:   #a855f7;
+  --ok:        #86efac;
+  --warn:      #fde68a;
+  --error:     #f87171;
+  --info:      #93c5fd;
+  --glow:      rgba(192,132,252,0.14);
+}
+[data-theme="light"] {
+  --bg:        #f4f5f7;
+  --bg2:       #eceef2;
+  --surface:   #ffffff;
+  --surface2:  #f8f9fb;
+  --border:    #dde0e8;
+  --border2:   #c8ccd8;
+  --text:      #1a1d2e;
+  --text2:     #5a6080;
+  --text3:     #9098b0;
+  --accent:    #4f6ef7;
+  --accent2:   #3a56d4;
+  --ok:        #16a34a;
+  --warn:      #d97706;
+  --error:     #dc2626;
+  --info:      #2563eb;
+  --glow:      rgba(79,110,247,0.10);
+}
+[data-theme="dark"] {
+  --bg:        #1a1d2e;
+  --bg2:       #20242f;
+  --surface:   #272a3a;
+  --surface2:  #2e3240;
+  --border:    #3a3e50;
+  --border2:   #4a4e60;
+  --text:      #c0c5d6;
+  --text2:     #7a8098;
+  --text3:     #505868;
+  --accent:    #7f9aff;
+  --accent2:   #6b8aff;
+  --ok:        #4ade80;
+  --warn:      #fb923c;
+  --error:     #f87171;
+  --info:      #60a5fa;
+  --glow:      rgba(127,154,255,0.15);
+}
+[data-theme="gruvbox-dark"] {
+  --bg:        #282828;
+  --bg2:       #3c3836;
+  --surface:   #45403d;
+  --surface2:  #504945;
+  --border:    #665c54;
+  --border2:   #7c6f64;
+  --text:      #ebdbb2;
+  --text2:     #a89984;
+  --text3:     #817265;
+  --accent:    #fabd2f;
+  --accent2:   #fe8019;
+  --ok:        #b8bb26;
+  --warn:      #d79921;
+  --error:     #cc241d;
+  --info:      #689d6a;
+  --glow:      rgba(250,189,47,0.15);
+}
+[data-theme="dracula"] {
+  --bg:        #282a36;
+  --bg2:       #44475a;
+  --surface:   #4f5368;
+  --surface2:  #6272a4;
+  --border:    #6272a4;
+  --border2:   #8a90a8;
+  --text:      #f8f8f2;
+  --text2:     #6272a4;
+  --text3:     #8f97b0;
+  --accent:    #ff79c6;
+  --accent2:   #bd93f9;
+  --ok:        #50fa7b;
+  --warn:      #ffb86c;
+  --error:     #ff5555;
+  --info:      #8be9fd;
+  --glow:      rgba(255,121,198,0.15);
+}
+
+/* ── Reset & base ───────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Ambient background glow */
+body::before {
+  content: '';
+  position: fixed;
+  top: -30%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 600px;
+  height: 600px;
+  background: radial-gradient(circle, var(--glow) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ── Theme switcher (top-right) ─────────────────────── */
+.theme-switcher {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 100;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  padding: 6px 10px;
+}
+.theme-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  border: 2px solid transparent;
+  outline: none;
+}
+.theme-dot:hover { transform: scale(1.2); }
+.theme-dot.active { border-color: var(--text); transform: scale(1.15); }
+.theme-dot[data-theme="midnight"] { background: #6c8aff; }
+.theme-dot[data-theme="slate"]    { background: #38bdf8; }
+.theme-dot[data-theme="ember"]    { background: #ff7849; }
+.theme-dot[data-theme="forest"]   { background: #4ade80; }
+.theme-dot[data-theme="ocean"]    { background: #22d3ee; }
+.theme-dot[data-theme="lavender"] { background: #c084fc; }
+.theme-dot[data-theme="light"]    { background: #f4f5f7; border-color: var(--border2); }
+.theme-dot[data-theme="dark"]     { background: #7f9aff; }
+.theme-dot[data-theme="gruvbox-dark"] { background: #fabd2f; }
+.theme-dot[data-theme="dracula"]  { background: #ff79c6; }
+
+/* ── Card ───────────────────────────────────────────── */
+.card {
+  position: relative;
+  z-index: 1;
+  width: 400px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 44px 40px 40px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.4), 0 0 0 1px var(--border);
+}
+
+/* ── Logo mark ──────────────────────────────────────── */
+.logo-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+.logo-icon {
+  width: 42px;
+  height: 42px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  flex-shrink: 0;
+  box-shadow: 0 4px 16px var(--glow);
+}
+.logo-text h1 {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+.logo-text p {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 1px;
+}
+
+/* ── Form elements ──────────────────────────────────── */
+.field { margin-bottom: 20px; }
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text2);
+  margin-bottom: 7px;
+  letter-spacing: 0.2px;
+}
+
+.input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-wrap input {
+  width: 100%;
+  padding: 11px 44px 11px 14px;
+  background: var(--bg2);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: 'Inter', sans-serif;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-wrap input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--glow);
+}
+.input-wrap input::placeholder { color: var(--text3); }
+
+/* Eye toggle */
+.eye-toggle {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text3);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+  line-height: 0;
+}
+.eye-toggle:hover { color: var(--text2); }
+.eye-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── Error message ──────────────────────────────────── */
+.error-msg {
+  font-size: 12.5px;
+  color: var(--error);
+  min-height: 18px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.error-msg:empty { margin-bottom: 16px; }
+
+/* ── Submit button ──────────────────────────────────── */
+.btn-submit {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.1s, box-shadow 0.15s;
+  box-shadow: 0 4px 16px var(--glow);
+  letter-spacing: 0.2px;
+}
+.btn-submit:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 24px var(--glow);
+}
+.btn-submit:active:not(:disabled) { transform: translateY(0); }
+.btn-submit:disabled { opacity: 0.5; cursor: default; transform: none; }
+</style>
+</head>
+<body>
+
+<!-- Theme switcher -->
+<div class="theme-switcher" role="group" aria-label="Choose theme">
+  <button class="theme-dot active" data-theme="midnight" title="Midnight" aria-label="Midnight theme"></button>
+  <button class="theme-dot" data-theme="slate"    title="Slate"    aria-label="Slate theme"></button>
+  <button class="theme-dot" data-theme="ember"    title="Ember"    aria-label="Ember theme"></button>
+  <button class="theme-dot" data-theme="forest"   title="Forest"   aria-label="Forest theme"></button>
+  <button class="theme-dot" data-theme="ocean"    title="Ocean"    aria-label="Ocean theme"></button>
+  <button class="theme-dot" data-theme="lavender" title="Lavender" aria-label="Lavender theme"></button>
+  <button class="theme-dot" data-theme="light"    title="Light"    aria-label="Light theme"></button>
+  <button class="theme-dot" data-theme="dark"     title="Dark"     aria-label="Dark theme"></button>
+  <button class="theme-dot" data-theme="gruvbox-dark" title="Gruvbox Dark" aria-label="Gruvbox Dark theme"></button>
+  <button class="theme-dot" data-theme="dracula"  title="Dracula"  aria-label="Dracula theme"></button>
+</div>
+
+<div class="card">
+  <div class="logo-wrap">
+    <div class="logo-icon">⬇</div>
+    <div class="logo-text">
+      <h1>yt-dlp Studio</h1>
+      <p>Media download manager</p>
+    </div>
+  </div>
+
+  <form id="login-form">
+    <div class="field">
+      <label for="passphrase">Access passphrase</label>
+      <div class="input-wrap">
+        <input
+          type="password"
+          id="passphrase"
+          name="passphrase"
+          placeholder="Enter your passphrase"
+          autofocus
+          autocomplete="current-password"
+          required
+        >
+        <button type="button" class="eye-toggle" id="eye-btn" aria-label="Toggle visibility" title="Show / hide passphrase">
+          <!-- eye-off icon (default — password hidden) -->
+          <svg id="eye-icon" viewBox="0 0 24 24">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+            <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="error-msg" id="error-msg"></div>
+
+    <button type="submit" class="btn-submit" id="submit-btn">Sign in</button>
+  </form>
+</div>
+
+<script>
+  // ── Theme ──────────────────────────────────────────
+  const THEME_KEY = 'ytdlp_theme';
+  const saved = localStorage.getItem(THEME_KEY) || 'midnight';
+  applyTheme(saved);
+
+  document.querySelectorAll('.theme-dot').forEach(btn => {
+    btn.addEventListener('click', () => applyTheme(btn.dataset.theme));
+  });
+
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+    document.querySelectorAll('.theme-dot').forEach(b => {
+      b.classList.toggle('active', b.dataset.theme === theme);
+    });
+  }
+
+  // ── Password visibility toggle ─────────────────────
+  const eyeBtn  = document.getElementById('eye-btn');
+  const eyeIcon = document.getElementById('eye-icon');
+  const pwInput = document.getElementById('passphrase');
+
+  const EYE_OPEN = `
+    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+    <circle cx="12" cy="12" r="3"/>
+  `;
+  const EYE_SHUT = `
+    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+    <line x1="1" y1="1" x2="23" y2="23"/>
+  `;
+
+  let visible = false;
+  eyeBtn.addEventListener('click', () => {
+    visible = !visible;
+    pwInput.type = visible ? 'text' : 'password';
+    eyeIcon.innerHTML = visible ? EYE_OPEN : EYE_SHUT;
+    eyeBtn.title = visible ? 'Hide passphrase' : 'Show passphrase';
+  });
+
+  // ── Login submit ───────────────────────────────────
+  const form      = document.getElementById('login-form');
+  const errorMsg  = document.getElementById('error-msg');
+  const submitBtn = document.getElementById('submit-btn');
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorMsg.textContent = '';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Checking…';
+
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase: pwInput.value }),
+      });
+      if (res.ok) {
+        window.location.href = '/';
+      } else {
+        errorMsg.textContent = '✕  Incorrect passphrase — try again.';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Sign in';
+        pwInput.focus();
+        pwInput.select();
+      }
+    } catch {
+      errorMsg.textContent = '✕  Could not reach server. Try again.';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign in';
+    }
+  });
+</script>
+</body>
+</html>

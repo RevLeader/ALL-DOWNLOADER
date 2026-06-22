@@ -27,9 +27,9 @@ from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from database import init_db, get_db, JobRecord
-from storage import upload_file, delete_local_file, get_presigned_download_url, delete_from_bucket
-from auth import (
+from app.database import init_db, get_db, JobRecord
+from app.storage import upload_file, delete_local_file, get_presigned_download_url, delete_from_bucket
+from app.auth import (
     check_passphrase,
     create_session_token,
     require_login,
@@ -45,6 +45,52 @@ from auth import (
 APP_DIR = Path(__file__).parent
 DOWNLOADS_DIR = APP_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+# Cookies directory — checked automatically based on the URL's domain.
+# On Render: upload cookie files as Secret Files under Environment → Secret Files.
+# Locally: put them in a cookies/ folder next to main.py (add cookies/ to .gitignore).
+# File naming convention:
+#   youtube.txt   → used for youtube.com, youtu.be
+#   x.txt         → used for x.com, twitter.com
+#   facebook.txt  → used for facebook.com, fb.watch
+#   instagram.txt → used for instagram.com
+# Add more as needed following the same pattern.
+COOKIES_DIR_CANDIDATES = [
+    Path("/etc/secrets"),          # Render Secret Files location
+    APP_DIR / "cookies",           # local dev folder
+]
+COOKIES_DIR = next((p for p in COOKIES_DIR_CANDIDATES if p.exists()), None)
+
+DOMAIN_COOKIE_MAP = {
+    "youtube.com":   "youtube.txt",
+    "youtu.be":      "youtube.txt",
+    "x.com":         "x.txt",
+    "twitter.com":   "x.txt",
+    "facebook.com":  "facebook.txt",
+    "fb.watch":      "facebook.txt",
+    "instagram.com": "instagram.txt",
+}
+
+def auto_cookie_file(url: str) -> Optional[str]:
+    """
+    Returns the path to a cookies file for the given URL's domain if one
+    exists on disk, otherwise None. Called automatically for every download
+    so the user never has to think about it.
+    """
+    if not COOKIES_DIR:
+        return None
+    try:
+        from urllib.parse import urlparse
+        host = urlparse(url).hostname or ""
+        # Strip www. prefix so www.youtube.com matches youtube.com
+        host = host.removeprefix("www.")
+        filename = DOMAIN_COOKIE_MAP.get(host)
+        if not filename:
+            return None
+        full_path = COOKIES_DIR / filename
+        return str(full_path) if full_path.exists() else None
+    except Exception:
+        return None
 
 app = FastAPI(title="yt-dlp GUI", description="Local control panel for yt-dlp")
 
@@ -259,7 +305,15 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         opts["format"] = "bestaudio/best"
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"}]
     else:
-        opts["format"] = "bestvideo+bestaudio/best"
+        if req.resolution:
+            # Cap to the chosen height; falls back to the best available
+            # *below* that cap if the exact height isn't offered.
+            opts["format"] = (
+                f"bestvideo[height<={req.resolution}]+bestaudio/"
+                f"best[height<={req.resolution}]"
+            )
+        else:
+            opts["format"] = "bestvideo+bestaudio/best"
         opts["merge_output_format"] = "mp4"
 
     postprocessors = opts.get("postprocessors", [])
@@ -290,12 +344,20 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
     if req.mode == Mode.X and not req.output_template:
         opts["outtmpl"] = str(out_dir / "%(uploader_id)s_%(id)s.%(ext)s")
 
-    if req.cookies_file:
+    # Auto-inject the right cookies file based on the URL's domain.
+    # The user never has to select anything — as long as you've placed the
+    # cookie files on the server, they're used automatically.
+    resolved_cookie = auto_cookie_file(req.url)
+    if resolved_cookie:
+        opts["cookiefile"] = resolved_cookie
+        job.add_log(f"Using saved login for this site.")
+    elif req.cookies_file:
+        # Fallback: a path was explicitly passed (e.g. from the API directly)
         cookie_path = Path(req.cookies_file)
         if cookie_path.exists():
             opts["cookiefile"] = str(cookie_path)
         else:
-            job.add_log(f"Warning: cookies file '{req.cookies_file}' not found, continuing without it")
+            job.add_log(f"Warning: cookies file '{req.cookies_file}' not found, continuing without it.")
 
     if req.raw_args:
         opts.setdefault("_raw_args_note", req.raw_args)

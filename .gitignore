@@ -7,3 +7,4 @@ venv/
 
 # Never commit real secrets
 .env
+cookies/
