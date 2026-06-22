@@ -167,9 +167,11 @@ class Job:
             self.log = self.log[-300:]
 
     def to_dict(self):
+        opts = self.options or {}
         return {
             "id": self.id,
             "url": self.url,
+            "display_title": opts.get("display_title"),
             "mode": self.mode,
             "options": self.options,
             "status": self.status,
@@ -245,7 +247,8 @@ def _persist(job: "Job"):
 # --------------------------------------------------------------------------
 
 class DownloadRequest(BaseModel):
-    url: str = Field(..., description="Video/playlist URL")
+    url: Optional[str] = Field(None, description="Video/playlist URL")
+    search_query: Optional[str] = Field(None, description="YouTube search query (song name, artist, etc.)")
     mode: Mode = Mode.MP4
     resolution: Optional[int] = None
     embed_thumbnail: bool = True
@@ -254,13 +257,26 @@ class DownloadRequest(BaseModel):
     subfolder: Optional[str] = None
     playlist_start: Optional[int] = None
     playlist_end: Optional[int] = None
+    # Legacy fields — ignored; kept so older clients don't 422
     search_first: bool = False
-    search_count: int = 5
-    filter_keywords: Optional[str] = "lyrics|visualizer|audio|bass.boosted|karaoke"
+    search_count: int = 1
+    filter_keywords: Optional[str] = None
     user_agent: Optional[str] = None
     cookies_file: Optional[str] = None
     use_archive: bool = True
     raw_args: Optional[str] = None
+
+    def effective_input(self) -> tuple[str, bool]:
+        """Returns (input_text, is_search)."""
+        search = (self.search_query or "").strip()
+        if search:
+            return search, True
+        if self.search_first and (self.url or "").strip():
+            return (self.url or "").strip(), True
+        link = (self.url or "").strip()
+        if not link:
+            raise ValueError("Provide a video link or a YouTube search term.")
+        return link, False
 
 
 class BatchRequest(BaseModel):
@@ -381,12 +397,6 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         if req.playlist_end:
             opts["playlistend"] = req.playlist_end
 
-    if req.search_first:
-        opts["default_search"] = f"ytsearch{req.search_count}"
-        if req.filter_keywords:
-            opts["match_filter"] = yt_dlp.utils.match_filter_func(f"title !~= (?i)({req.filter_keywords})")
-        opts["max_downloads"] = 1
-
     if req.mode == Mode.FACEBOOK or req.user_agent:
         opts["http_headers"] = {
             "User-Agent": req.user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -396,9 +406,7 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         opts["outtmpl"] = str(out_dir / "%(uploader_id)s_%(id)s.%(ext)s")
 
     # Auto-inject the right cookies file based on the URL's domain.
-    # The user never has to select anything — as long as you've placed the
-    # cookie files on the server, they're used automatically.
-    resolved_cookie = auto_cookie_file(req.url)
+    resolved_cookie = auto_cookie_file(job.url)
     if resolved_cookie:
         opts["cookiefile"] = resolved_cookie
         # Suppress cookie-related warnings/errors — they're noisy and usually
@@ -514,9 +522,15 @@ def _postprocessor_hook(job: Job, d: dict):
     extension or filename after that snapshot was taken.
     """
     if d.get("status") == "finished":
-        filepath = d.get("info_dict", {}).get("filepath") or d.get("filepath")
+        info = d.get("info_dict") or {}
+        filepath = info.get("filepath") or d.get("filepath")
         if filepath:
             job.filename = os.path.basename(filepath)
+        title = info.get("title")
+        if title:
+            job.options = dict(job.options or {})
+            if not job.options.get("display_title"):
+                job.options["display_title"] = title
 
 
 # --------------------------------------------------------------------------
@@ -525,22 +539,107 @@ def _postprocessor_hook(job: Job, d: dict):
 
 def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path]:
     """
-    Fallback for when the tracked job.filename doesn't exist on disk —
-    looks for a file in out_dir whose modification time is after the job
-    started. Only returns a result if exactly one candidate is found,
-    since picking the "wrong" file among several ambiguous candidates
-    would be worse than just failing with a clear error.
+    Looks for a file in out_dir written after the job started.
+    When several candidates exist, returns the newest one.
     """
     if not out_dir.exists():
         return None
-    since_ts = since.timestamp()
+    since_ts = since.timestamp() - 2  # small clock slack
+    skip_names = {".part", ".ytdl", ".tmp"}
     candidates = [
         f for f in out_dir.iterdir()
-        if f.is_file() and f.stat().st_mtime >= since_ts and not f.name.endswith((".part", ".ytdl", ".tmp"))
+        if f.is_file()
+        and f.stat().st_mtime >= since_ts
+        and f.name != "archive.txt"
+        and not any(f.name.endswith(ext) for ext in skip_names)
     ]
+    if not candidates:
+        return None
     if len(candidates) == 1:
         return candidates[0]
-    return None
+    return max(candidates, key=lambda f: f.stat().st_mtime)
+
+
+def _locate_output_file(job: "Job", out_dir: Path) -> Optional[Path]:
+    """Find the finished download on disk using tracked name or mtime fallback."""
+    if job.filename:
+        candidate = out_dir / job.filename
+        if candidate.exists():
+            return candidate
+    fallback = _find_recently_written_file(out_dir, job.created_at)
+    if fallback:
+        job.filename = fallback.name
+    return fallback
+
+
+def _was_archive_skipped(job: "Job") -> bool:
+    markers = (
+        "already been recorded in the archive",
+        "has already been downloaded",
+        "already downloaded",
+    )
+    haystack = " ".join(job.log).lower()
+    return any(m in haystack for m in markers)
+
+
+def _resolve_youtube_search(query: str, cookiefile: Optional[str] = None) -> dict:
+    """
+    Search YouTube and return the top result's URL and title.
+    Uses ytsearch1 so we always pick the best-ranked official match.
+    """
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "extract_flat": False,
+    }
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(f"ytsearch1:{query}", download=False)
+
+    entries = info.get("entries") or []
+    if not entries:
+        raise yt_dlp.utils.DownloadError(f'No YouTube results for "{query}"')
+
+    entry = entries[0]
+    video_id = entry.get("id")
+    url = entry.get("webpage_url") or entry.get("url")
+    if not url and video_id:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+    title = entry.get("title") or query
+    if not url:
+        raise yt_dlp.utils.DownloadError(f'Could not resolve a video URL for "{query}"')
+
+    return {"url": url, "title": title, "id": video_id}
+
+
+def _prepare_download_request(job: "Job", req: DownloadRequest) -> tuple[DownloadRequest, str]:
+    """
+    Resolves YouTube search queries to a concrete video URL and stores the
+    real YouTube title on the job for display.
+    Returns (updated_request, download_url).
+    """
+    try:
+        input_text, is_search = req.effective_input()
+    except ValueError as exc:
+        raise yt_dlp.utils.DownloadError(str(exc)) from exc
+
+    download_url = input_text
+    if is_search:
+        job.add_log(f'Searching YouTube for: "{input_text}"')
+        cookiefile = auto_cookie_file("https://www.youtube.com/")
+        resolved = _resolve_youtube_search(input_text, cookiefile=cookiefile)
+        download_url = resolved["url"]
+        job.url = download_url
+        job.options = dict(job.options or {})
+        job.options["display_title"] = resolved["title"]
+        job.options["search_query"] = input_text
+        job.add_log(f'Found: {resolved["title"]}')
+        _persist(job)
+
+    return req, download_url
 
 
 def _upload_or_fallback(job: "Job", local_path: str):
@@ -605,9 +704,10 @@ def run_job(job: Job, req: DownloadRequest):
     _persist(job)
 
     try:
+        req, download_url = _prepare_download_request(job, req)
         opts = build_ydl_opts(job, req)
         with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([job.url])
+            ydl.download([download_url])
 
         if job.cancel_requested:
             job.status = JobStatus.CANCELLED
@@ -622,38 +722,27 @@ def run_job(job: Job, req: DownloadRequest):
             _persist(job)
             return
 
-        # Download succeeded — now push the finished file to R2 so it
-        # survives restarts/redeploys instead of sitting on ephemeral disk.
-        if job.filename:
-            out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
-            local_path = out_dir / job.filename
-            if local_path.exists():
-                job.status = JobStatus.UPLOADING
-                job.add_log("Uploading finished file to cloud storage...")
-                _persist(job)
+        out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
+        local_path = _locate_output_file(job, out_dir)
 
-                _upload_or_fallback(job, str(local_path))
+        if not local_path:
+            if _was_archive_skipped(job):
+                job.status = JobStatus.ERROR
+                job.error = (
+                    "This video was skipped because it was downloaded before. "
+                    "Uncheck “Skip videos already downloaded” to download it again."
+                )
             else:
-                # The hooks' tracked filename doesn't exist on disk — this
-                # can happen if postprocessing renamed/changed the extension
-                # in a way neither hook caught. Last resort: look for a file
-                # in the output dir that was just written (modified after
-                # this job started) before giving up entirely.
-                fallback_path = _find_recently_written_file(out_dir, job.created_at)
-                if fallback_path:
-                    job.filename = fallback_path.name
-                    job.add_log(f"Note: expected filename mismatch — found '{job.filename}' instead.")
-                    job.status = JobStatus.UPLOADING
-                    job.add_log("Uploading finished file to cloud storage...")
-                    _persist(job)
+                job.status = JobStatus.ERROR
+                job.error = "Download finished but no output file was found."
+            job.add_log(f"Error: {job.error}")
+            _persist(job)
+            return
 
-                    _upload_or_fallback(job, str(fallback_path))
-                else:
-                    job.status = JobStatus.ERROR
-                    job.error = f"Expected file '{job.filename}' not found on disk after download."
-                    job.add_log(f"Error: expected file '{job.filename}' not found on disk after download.")
-                    _persist(job)
-                    return
+        job.status = JobStatus.UPLOADING
+        job.add_log("Uploading finished file to cloud storage...")
+        _persist(job)
+        _upload_or_fallback(job, str(local_path))
 
         job.status = JobStatus.DONE
         job.add_log("Done.")
@@ -809,8 +898,14 @@ def auth_status(request: Request):
 @app.post("/api/jobs", dependencies=[Depends(require_login)])
 def create_job(req: DownloadRequest, request: Request):
     user_id = get_user_id(request)
+    try:
+        input_text, is_search = req.effective_input()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     job_id = uuid.uuid4().hex[:10]
-    job = Job(job_id, user_id, req.url, req.mode, req.dict())
+    initial_url = input_text if not is_search else f'search: {input_text}'
+    job = Job(job_id, user_id, initial_url, req.mode, req.model_dump())
 
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -1005,7 +1100,14 @@ def delete_job(job_id: str, request: Request, db: Session = Depends(get_db)):
 @app.put("/api/jobs/{job_id}/retry", dependencies=[Depends(require_login)])
 def retry_job(job_id: str, request: Request):
     old = _get_owned_job(job_id, get_user_id(request))
-    req = DownloadRequest(**old.options)
+    opts = dict(old.options or {})
+    field_names = DownloadRequest.model_fields.keys()
+    clean = {k: v for k, v in opts.items() if k in field_names}
+    if clean.get("search_query"):
+        clean["url"] = None
+    elif not clean.get("url"):
+        clean["url"] = old.url
+    req = DownloadRequest(**clean)
     return create_job(req, request)
 
 

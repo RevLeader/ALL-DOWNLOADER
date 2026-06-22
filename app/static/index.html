@@ -389,7 +389,7 @@ details.optional summary::-webkit-details-marker { display: none; }
 .badge.cancelled { background: var(--surface-raised); color: var(--ink-faint); }
 .badge.cancelled .dot { background: var(--ink-faint); }
 
-.job-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.job-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; }
 .icon-btn {
   background: transparent; border: 1px solid var(--line); color: var(--ink-dim);
   border-radius: var(--radius); padding: 6px 11px; font-size: 10.5px; cursor: pointer;
@@ -399,6 +399,34 @@ details.optional summary::-webkit-details-marker { display: none; }
 .icon-btn.danger:hover { color: var(--rec); border-color: var(--rec); }
 .icon-btn.go { color: var(--go); border-color: var(--go); }
 .icon-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Prominent save button — always visible when a file is ready */
+.btn-save-file {
+  display: block; width: 100%; margin-top: 12px;
+  background: color-mix(in srgb, var(--go) 16%, var(--surface));
+  border: 1px solid var(--go); color: var(--go);
+  border-radius: var(--radius); padding: 12px 16px;
+  font-family: var(--f-display); font-weight: 700; font-size: 13px;
+  text-transform: uppercase; letter-spacing: 0.6px; cursor: pointer;
+}
+.btn-save-file:hover { filter: brightness(1.08); }
+.btn-save-file:disabled { opacity: 0.45; cursor: default; }
+
+.job-headline {
+  font-size: 13px; font-weight: 600; color: var(--tape);
+  line-height: 1.35; margin-bottom: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.job-url-line {
+  font-size: 11px; color: var(--ink-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.field-or {
+  text-align: center; color: var(--ink-faint); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.8px; margin: -4px 0 11px;
+}
 
 /* ── VU-METER PROGRESS STRIP ── */
 .meter-strip {
@@ -456,9 +484,14 @@ details.optional summary::-webkit-details-marker { display: none; }
   html, body { overflow-x: hidden; }
   /* Ensure textarea doesn't cause horizontal overflow */
   textarea { max-width: 100%; }
-  /* Slightly larger tap targets on action buttons */
-  .icon-btn { padding: 9px 14px; font-size: 11px; }
+  /* Larger tap targets on action buttons */
+  .icon-btn { padding: 9px 14px; font-size: 11px; min-height: 44px; }
   .btn-go { padding: 16px; }
+  .btn-save-file { padding: 14px 16px; min-height: 48px; font-size: 14px; }
+  /* Stack job header so action buttons never clip off-screen */
+  .job-top { flex-direction: column; align-items: stretch; gap: 8px; }
+  .job-actions { width: 100%; justify-content: flex-end; }
+  .job-url { white-space: normal; word-break: break-all; }
 }
 </style>
 </head>
@@ -540,7 +573,19 @@ details.optional summary::-webkit-details-marker { display: none; }
               <span class="info-tooltip">Paste the full link to the video or playlist you want to download. Works with YouTube, Vimeo, Twitter/X, Facebook, and hundreds of other sites.</span>
             </button>
           </div>
-          <input type="text" id="s-url" placeholder="https://www.youtube.com/watch?v=…" required>
+          <input type="text" id="s-url" placeholder="https://www.youtube.com/watch?v=…">
+        </div>
+
+        <div class="field-or">or</div>
+
+        <div class="field">
+          <div class="field-label-row">
+            <label for="s-search-query">Search YouTube by name</label>
+            <button type="button" class="info-btn" tabindex="-1" aria-label="Search by name">i
+              <span class="info-tooltip">Type a song, artist, or video title. The app searches YouTube and downloads the top match — using the real title from YouTube, not your exact spelling.</span>
+            </button>
+          </div>
+          <input type="text" id="s-search-query" placeholder="e.g. Drake — God's Plan">
         </div>
 
         <div class="field-row">
@@ -625,33 +670,6 @@ details.optional summary::-webkit-details-marker { display: none; }
               </button>
             </div>
             <input type="text" id="s-subfolder" placeholder="e.g. Study Videos">
-          </div>
-
-          <div class="checkrow">
-            <input type="checkbox" id="s-search">
-            <label for="s-search">Search YouTube instead of using a link</label>
-          </div>
-          <div id="s-search-opts" style="display:none; margin-left: 24px; margin-bottom: 12px;">
-            <div class="field-row">
-              <div class="field">
-                <div class="field-label-row">
-                  <label for="s-search-count">Number of results to try</label>
-                  <button type="button" class="info-btn" tabindex="-1" aria-label="Search results">i
-                    <span class="info-tooltip">How many YouTube search results to look through before picking the best match. 5 is usually enough.</span>
-                  </button>
-                </div>
-                <input type="number" id="s-search-count" value="5" min="1">
-              </div>
-              <div class="field">
-                <div class="field-label-row">
-                  <label for="s-filter">Skip results containing</label>
-                  <button type="button" class="info-btn" tabindex="-1" aria-label="Skip results">i
-                    <span class="info-tooltip">Words to avoid in search results — useful for skipping lyric videos or covers. Separate words with a pipe "|" symbol. Leave blank to accept any result.</span>
-                  </button>
-                </div>
-                <input type="text" id="s-filter" value="lyrics|visualizer|karaoke">
-              </div>
-            </div>
           </div>
 
           <div class="field">
@@ -908,10 +926,6 @@ el('s-mode').addEventListener('change', () => {
   el('s-range-row').style.display = el('s-mode').value === 'playlist_range' ? 'grid' : 'none';
 });
 
-el('s-search').addEventListener('change', () => {
-  el('s-search-opts').style.display = el('s-search').checked ? 'block' : 'none';
-});
-
 el('b-zip').addEventListener('change', () => {
   el('b-zippass-field').style.display = el('b-zip').checked ? 'block' : 'none';
 });
@@ -972,17 +986,30 @@ el('single-form').addEventListener('submit', async (e) => {
   msg.textContent = ''; msg.className = 'form-msg';
   btn.disabled = true; btn.textContent = 'Starting…';
 
+  const url = el('s-url').value.trim();
+  const searchQuery = el('s-search-query').value.trim();
+  if (!url && !searchQuery) {
+    msg.textContent = 'Paste a video link or enter a YouTube search term.';
+    msg.className = 'form-msg error';
+    btn.disabled = false; btn.textContent = 'Download';
+    return;
+  }
+  if (url && searchQuery) {
+    msg.textContent = 'Use either a video link or a search term — not both at once.';
+    msg.className = 'form-msg error';
+    btn.disabled = false; btn.textContent = 'Download';
+    return;
+  }
+
   const payload = {
-    url: el('s-url').value.trim(),
+    url: url || null,
+    search_query: searchQuery || null,
     mode: el('s-mode').value,
     resolution: el('s-resolution').value ? parseInt(el('s-resolution').value, 10) : null,
     embed_thumbnail: el('s-thumb').checked,
     add_metadata: el('s-meta').checked,
     use_archive: el('s-archive').checked,
     subfolder: el('s-subfolder').value.trim() || null,
-    search_first: el('s-search').checked,
-    search_count: parseInt(el('s-search-count').value, 10) || 5,
-    filter_keywords: el('s-filter').value.trim() || null,
     user_agent: resolveUserAgent('s-useragent', 's-useragent-custom'),
     raw_args: null,
   };
@@ -1000,6 +1027,7 @@ el('single-form').addEventListener('submit', async (e) => {
     msg.textContent = 'Download queued — check the list on the right.';
     msg.className = 'form-msg ok';
     el('s-url').value = '';
+    el('s-search-query').value = '';
     await refreshJobs();
   } catch (err) {
     msg.textContent = err.message || 'Something went wrong.';
@@ -1069,36 +1097,29 @@ async function downloadJob(jobId, btnEl) {
   if (downloadingUrls.has(jobId)) return;
   downloadingUrls.add(jobId);
   const original = btnEl.textContent;
-  btnEl.textContent = '…'; btnEl.disabled = true;
+  btnEl.textContent = 'Preparing…'; btnEl.disabled = true;
   try {
     const res = await api(`/api/jobs/${jobId}/download`);
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'File not ready'); }
     const data = await res.json();
-    if (data.local_only) {
-      // R2 upload failed — stream directly from server disk (temporary!)
-      // Use hidden anchor to trigger save-as on mobile/desktop alike
-      const a = document.createElement('a');
-      a.href = `/api/jobs/${jobId}/download-local`;
-      a.download = '';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => document.body.removeChild(a), 500);
-    } else {
-      // Pre-signed R2 URL — use hidden anchor so mobile browsers trigger a
-      // download instead of opening the file in the browser tab.
-      const a = document.createElement('a');
-      a.href = data.url;
-      a.download = '';           // filename comes from Content-Disposition header
-      a.target = '_blank';       // open in new tab as fallback for browsers that don't honour download attr on cross-origin
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => document.body.removeChild(a), 500);
-    }
-  } catch (err) { console.error(err); }
-  finally {
+    const downloadHref = data.local_only
+      ? `/api/jobs/${jobId}/download-local`
+      : data.url;
+    const a = document.createElement('a');
+    a.href = downloadHref;
+    a.download = '';
+    a.rel = 'noopener noreferrer';
+    if (!data.local_only) a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 500);
+    btnEl.textContent = 'Save to device';
+  } catch (err) {
+    console.error(err);
+    btnEl.textContent = original;
+  } finally {
     downloadingUrls.delete(jobId);
-    btnEl.textContent = original; btnEl.disabled = false;
+    btnEl.disabled = false;
   }
 }
 
@@ -1144,9 +1165,15 @@ function statusLabel(status) {
 }
 
 // ── Job card ──
+function jobHeadline(job) {
+  return job.display_title || job.filename || job.url;
+}
+
 function renderJobCard(job) {
   const status = job.status;
   const isActive = status === 'queued' || status === 'running' || status === 'uploading';
+  const headline = jobHeadline(job);
+  const showUrlLine = job.display_title && job.url && !job.url.startsWith('search:');
 
   // Progress stats — only show what's actually useful
   let statsHtml = '';
@@ -1177,7 +1204,7 @@ function renderJobCard(job) {
   let uploadWarnHtml = '';
   if (job.upload_failed) {
     uploadWarnHtml = `<div class="job-error" style="background:rgba(232,163,61,0.12);border-color:var(--accent);color:var(--accent)">
-      ⚠ Cloud upload failed — file is on this server only. Download it now before the server restarts.
+      ⚠ Cloud upload failed — file is on this server only. Save it now before the server restarts.
     </div>`;
   }
 
@@ -1188,25 +1215,29 @@ function renderJobCard(job) {
     errorHtml = `<div class="job-error">${escapeHtml(msg)}</div>`;
   }
 
-  // Actions
+  // Save button — full-width, always easy to tap on mobile
+  let saveHtml = '';
+  if (status === 'done' && job.download_ready) {
+    saveHtml = `<button type="button" class="btn-save-file" onclick="downloadJob('${job.id}', this)">Save to device</button>`;
+  }
+
+  // Secondary actions (remove / cancel / retry)
   const actions = [];
   if (isActive) {
-    actions.push(`<button class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Cancel</button>`);
+    actions.push(`<button type="button" class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Cancel</button>`);
   } else {
-    if (status === 'done' && job.download_ready) {
-      actions.push(`<button class="icon-btn go" onclick="downloadJob('${job.id}', this)">Download</button>`);
-    }
     if (status === 'error' || status === 'cancelled') {
-      actions.push(`<button class="icon-btn" onclick="retryJob('${job.id}')">Retry</button>`);
+      actions.push(`<button type="button" class="icon-btn" onclick="retryJob('${job.id}')">Retry</button>`);
     }
-    actions.push(`<button class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Remove</button>`);
+    actions.push(`<button type="button" class="icon-btn danger" onclick="cancelOrDeleteJob('${job.id}')">Remove</button>`);
   }
 
   return `
     <div class="job-card ${isActive ? 'is-active' : ''}" data-job-id="${job.id}">
       <div class="job-top">
         <div class="job-meta">
-          <div class="job-url" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>
+          <div class="job-headline" title="${escapeHtml(headline)}">${escapeHtml(headline)}</div>
+          ${showUrlLine ? `<div class="job-url-line" title="${escapeHtml(job.url)}">${escapeHtml(job.url)}</div>` : ''}
           <div class="job-sub">
             <span class="badge ${status}"><span class="dot"></span>${statusLabel(status)}</span>
             <span>${fmtMode(job.mode)}</span>
@@ -1218,6 +1249,7 @@ function renderJobCard(job) {
       ${renderMeterStrip(job)}
       ${statsHtml}
       ${fileHtml}
+      ${saveHtml}
       ${uploadWarnHtml}
       ${errorHtml}
     </div>`;
