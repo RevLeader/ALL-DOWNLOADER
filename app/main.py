@@ -12,6 +12,7 @@ This version adds:
 """
 
 import os
+import shutil
 import uuid
 import threading
 import time
@@ -76,6 +77,11 @@ def auto_cookie_file(url: str) -> Optional[str]:
     Returns the path to a cookies file for the given URL's domain if one
     exists on disk, otherwise None. Called automatically for every download
     so the user never has to think about it.
+
+    The source file (e.g. /etc/secrets/youtube.txt on Render) is read-only,
+    but yt-dlp sometimes rewrites the cookie jar mid-run (cookie rotation).
+    So we copy it into the writable downloads/ dir first and hand yt-dlp
+    that copy instead of the original.
     """
     if not COOKIES_DIR:
         return None
@@ -88,7 +94,13 @@ def auto_cookie_file(url: str) -> Optional[str]:
         if not filename:
             return None
         full_path = COOKIES_DIR / filename
-        return str(full_path) if full_path.exists() else None
+        if not full_path.exists():
+            return None
+
+        # Copy to writable downloads dir
+        writable = DOWNLOADS_DIR / filename
+        shutil.copy2(str(full_path), str(writable))
+        return str(writable)
     except Exception:
         return None
 
