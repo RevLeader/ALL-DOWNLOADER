@@ -9,3 +9,4 @@ boto3>=1.34
 itsdangerous>=2.1
 python-dotenv>=1.0
 pyzipper>=0.3.6
+imageio[ffmpeg]
