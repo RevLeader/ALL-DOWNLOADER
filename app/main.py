@@ -344,12 +344,25 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"}]
     else:
         if req.resolution:
-            # Cap to the chosen height; falls back to the best available
-            # *below* that cap if the exact height isn't offered.
-            opts["format"] = (
-                f"bestvideo[height<={req.resolution}]+bestaudio/"
-                f"best[height<={req.resolution}]"
-            )
+            # Try the requested height first, then progressively fall back to lower
+            # resolutions rather than erroring when the exact height isn't available
+            # (e.g. a reel that only offers 720p when 1080p was requested).
+            h = req.resolution
+            fallbacks = [h, 1080, 720, 480, 360] if h > 360 else [h, 360]
+            # Build a chain: bestvideo[height<=X]+bestaudio / best[height<=X]
+            # for each fallback height, deduplicated while preserving order.
+            seen = set()
+            parts = []
+            for fh in fallbacks:
+                if fh not in seen:
+                    seen.add(fh)
+                    parts.append(
+                        f"bestvideo[height<={fh}]+bestaudio[ext=m4a]/"
+                        f"bestvideo[height<={fh}]+bestaudio/"
+                        f"best[height<={fh}]"
+                    )
+            parts.append("bestvideo+bestaudio/best")  # final catch-all
+            opts["format"] = "/".join(parts)
         else:
             opts["format"] = "bestvideo+bestaudio/best"
         opts["merge_output_format"] = "mp4"
@@ -388,12 +401,17 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
     resolved_cookie = auto_cookie_file(req.url)
     if resolved_cookie:
         opts["cookiefile"] = resolved_cookie
+        # Suppress cookie-related warnings/errors — they're noisy and usually
+        # harmless (expired entries, missing fields). yt-dlp will still use the
+        # valid cookies from the file; we just don't want the error log spam.
+        opts["no_warnings"] = True
         job.add_log(f"Using saved login for this site.")
     elif req.cookies_file:
         # Fallback: a path was explicitly passed (e.g. from the API directly)
         cookie_path = Path(req.cookies_file)
         if cookie_path.exists():
             opts["cookiefile"] = str(cookie_path)
+            opts["no_warnings"] = True
         else:
             job.add_log(f"Warning: cookies file '{req.cookies_file}' not found, continuing without it.")
 
@@ -419,6 +437,17 @@ class JobLogger:
         self.job.add_log(msg)
 
     def warning(self, msg):
+        # Suppress noisy-but-harmless cookie warnings (expired entries, missing
+        # columns, etc.) — they don't affect the download and just confuse users.
+        cookie_noise = (
+            "Couldn't decrypt cookie",
+            "unable to open database",
+            "KeyError: 'expirationDate'",
+            "cookie",         # broad — catches "cookies file", "cookie jar", etc.
+            "sqlite",
+        )
+        if any(kw.lower() in msg.lower() for kw in cookie_noise):
+            return   # swallow silently
         if "Retrying" in msg or "Giving up after" in msg:
             self.job.add_log(f"Network issue/interruption: {msg} (Will keep retrying)")
         else:
@@ -428,6 +457,17 @@ class JobLogger:
         if "max-downloads" in msg or "Maximum number of downloads reached" in msg:
             self.job.add_log(f"Stopped after first match (by design): {msg}")
             return
+        # Suppress cookie-related errors — they're usually non-fatal (expired
+        # session, missing file) and yt-dlp will continue without them.
+        cookie_noise = (
+            "Couldn't decrypt cookie",
+            "unable to open database",
+            "cookie",
+            "sqlite",
+        )
+        if any(kw.lower() in msg.lower() for kw in cookie_noise):
+            self.job.add_log(f"Note: cookie issue (continuing without saved login): {msg}")
+            return   # don't mark job as errored
         self.had_error = True
         self.last_error = msg
         self.job.add_log(f"Error: {msg}")

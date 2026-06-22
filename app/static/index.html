@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>Deck — yt-dlp</title>
 <style>
 :root {
@@ -49,10 +49,36 @@
   --accent: #b5742a; --accent-ink: #fff9f0;
   --rec: #b8392a; --go: #4a7a3d; --play: #2f6a8c;
 }
+[data-theme="ivory"] {
+  --bg: #f9f7f4; --surface: #ffffff; --surface-raised: #f3f1ee;
+  --line: #e4dfd8; --line-strong: #d0c9bf;
+  --tape: #1a1814; --ink-dim: #5c5750; --ink-faint: #8e8880;
+  --accent: #4a7fa5; --accent-ink: #f0f8ff;
+  --rec: #c0392b; --go: #27742a; --play: #4a7fa5;
+}
+[data-theme="linen"] {
+  --bg: #f0ece4; --surface: #faf8f5; --surface-raised: #f5f2ec;
+  --line: #ddd6c8; --line-strong: #c8beac;
+  --tape: #2c2318; --ink-dim: #7a6e60; --ink-faint: #a09589;
+  --accent: #6b4c8a; --accent-ink: #fdf8ff;
+  --rec: #a83232; --go: #3d7040; --play: #4a6f9a;
+}
 
 * { box-sizing: border-box; }
 html { color-scheme: dark; }
-[data-theme="paper"] { color-scheme: light; }
+[data-theme="paper"], [data-theme="ivory"], [data-theme="linen"] { color-scheme: light; }
+
+/* System theme: maps to paper (light) or amber (dark) unless user picks manually */
+@media (prefers-color-scheme: light) {
+  body:not([data-theme-manual]) {
+    --bg: #f4f0e6; --surface: #ffffff; --surface-raised: #fbf8f0;
+    --line: #ddd5c2; --line-strong: #c9bea4;
+    --tape: #211d14; --ink-dim: #6b6353; --ink-faint: #9b9384;
+    --accent: #b5742a; --accent-ink: #fff9f0;
+    --rec: #b8392a; --go: #4a7a3d; --play: #2f6a8c;
+    color-scheme: light;
+  }
+}
 
 body {
   margin: 0; min-height: 100vh;
@@ -201,7 +227,13 @@ select, textarea {
   width: 100%; padding: 9px 11px;
   background: var(--surface); border: 1px solid var(--line);
   border-radius: var(--radius); color: var(--tape);
-  font-size: 12.5px; font-family: var(--f-body);
+  /* iOS Safari zooms in when font-size < 16px — keep it at 16px on mobile
+     and scale it down only on wider screens. */
+  font-size: 16px; font-family: var(--f-body);
+}
+@media (min-width: 480px) {
+  input[type="text"], input[type="number"], input[type="password"],
+  select, textarea { font-size: 12.5px; }
 }
 textarea { resize: vertical; min-height: 88px; font-family: var(--f-mono); }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
@@ -413,9 +445,24 @@ details.optional summary::-webkit-details-marker { display: none; }
 @media (prefers-reduced-motion: reduce) {
   .meter-strip.indeterminate .meter-seg { animation: none; opacity: 0.6; }
 }
+
+/* ── MOBILE LAYOUT STABILITY ── */
+@media (max-width: 920px) {
+  /* Prevent header from jumping when soft keyboard appears */
+  header { position: sticky; top: 0; }
+  /* Give the rail a natural height, no min-height trap */
+  .deck { min-height: unset; }
+  /* Prevent iOS bounce/overscroll from shifting the layout */
+  html, body { overflow-x: hidden; }
+  /* Ensure textarea doesn't cause horizontal overflow */
+  textarea { max-width: 100%; }
+  /* Slightly larger tap targets on action buttons */
+  .icon-btn { padding: 9px 14px; font-size: 11px; }
+  .btn-go { padding: 16px; }
+}
 </style>
 </head>
-<body data-theme="amber">
+<body data-theme="paper">
 
 <header>
   <div class="header-main">
@@ -429,11 +476,14 @@ details.optional summary::-webkit-details-marker { display: none; }
           <span class="theme-swatch"></span> Theme
         </button>
         <div class="theme-menu" id="theme-menu">
-          <button class="theme-option active" data-theme="amber"><span class="dot" style="background:#e8a33d"></span>Reel Amber</button>
+          <button class="theme-option" data-theme="system"><span class="dot" style="background:linear-gradient(135deg,#b5742a 50%,#e8a33d 50%)"></span>System</button>
+          <button class="theme-option" data-theme="amber"><span class="dot" style="background:#e8a33d"></span>Reel Amber</button>
           <button class="theme-option" data-theme="phosphor"><span class="dot" style="background:#5fe066"></span>Phosphor</button>
           <button class="theme-option" data-theme="darkroom"><span class="dot" style="background:#e0654a"></span>Darkroom</button>
           <button class="theme-option" data-theme="slate"><span class="dot" style="background:#5b9bd8"></span>Slate</button>
-          <button class="theme-option" data-theme="paper"><span class="dot" style="background:#b5742a"></span>Paper</button>
+          <button class="theme-option active" data-theme="paper"><span class="dot" style="background:#b5742a"></span>Paper</button>
+          <button class="theme-option" data-theme="ivory"><span class="dot" style="background:#4a7fa5"></span>Ivory</button>
+          <button class="theme-option" data-theme="linen"><span class="dot" style="background:#6b4c8a"></span>Linen</button>
         </div>
       </div>
       <button class="btn-logout" id="logout-btn">Log out</button>
@@ -756,20 +806,45 @@ details.optional summary::-webkit-details-marker { display: none; }
 <script>
 // ── Theme picker ──
 const THEMES = {
-  amber: '#e8a33d', phosphor: '#5fe066', darkroom: '#e0654a', slate: '#5b9bd8', paper: '#b5742a',
+  amber: '#e8a33d', phosphor: '#5fe066', darkroom: '#e0654a', slate: '#5b9bd8',
+  paper: '#b5742a', ivory: '#4a7fa5', linen: '#6b4c8a',
 };
+const SYSTEM_SWATCH = 'linear-gradient(135deg,#b5742a 50%,#e8a33d 50%)';
+
 const themeBtn = document.getElementById('theme-btn');
 const themeMenu = document.getElementById('theme-menu');
 const themeSwatch = themeBtn.querySelector('.theme-swatch');
+
+function applyTheme(theme) {
+  if (theme === 'system') {
+    document.body.removeAttribute('data-theme');
+    document.body.removeAttribute('data-theme-manual');
+    themeSwatch.style.background = SYSTEM_SWATCH;
+    themeSwatch.style.borderRadius = '50%';
+  } else {
+    document.body.setAttribute('data-theme', theme);
+    document.body.setAttribute('data-theme-manual', '1');
+    themeSwatch.style.background = THEMES[theme] || THEMES.paper;
+    themeSwatch.style.borderRadius = '50%';
+  }
+  document.querySelectorAll('.theme-option').forEach(o =>
+    o.classList.toggle('active', o.dataset.theme === theme)
+  );
+}
+
+// Restore saved theme on load (default: paper)
+(function() {
+  const saved = localStorage.getItem('deckTheme') || 'paper';
+  applyTheme(saved);
+})();
 
 themeBtn.addEventListener('click', (e) => { e.stopPropagation(); themeMenu.classList.toggle('open'); });
 document.addEventListener('click', () => themeMenu.classList.remove('open'));
 document.querySelectorAll('.theme-option').forEach(opt => {
   opt.addEventListener('click', () => {
     const theme = opt.dataset.theme;
-    document.body.setAttribute('data-theme', theme);
-    themeSwatch.style.background = THEMES[theme];
-    document.querySelectorAll('.theme-option').forEach(o => o.classList.toggle('active', o === opt));
+    applyTheme(theme);
+    localStorage.setItem('deckTheme', theme);
     themeMenu.classList.remove('open');
   });
 });
@@ -1001,9 +1076,24 @@ async function downloadJob(jobId, btnEl) {
     const data = await res.json();
     if (data.local_only) {
       // R2 upload failed — stream directly from server disk (temporary!)
-      window.location.href = `/api/jobs/${jobId}/download-local`;
+      // Use hidden anchor to trigger save-as on mobile/desktop alike
+      const a = document.createElement('a');
+      a.href = `/api/jobs/${jobId}/download-local`;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 500);
     } else {
-      window.open(data.url, '_blank');
+      // Pre-signed R2 URL — use hidden anchor so mobile browsers trigger a
+      // download instead of opening the file in the browser tab.
+      const a = document.createElement('a');
+      a.href = data.url;
+      a.download = '';           // filename comes from Content-Disposition header
+      a.target = '_blank';       // open in new tab as fallback for browsers that don't honour download attr on cross-origin
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => document.body.removeChild(a), 500);
     }
   } catch (err) { console.error(err); }
   finally {
