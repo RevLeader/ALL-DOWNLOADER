@@ -16,8 +16,8 @@ them. See .env.example for the exact names expected.
 import os
 import mimetypes
 
-import boto3
-from botocore.client import Config
+import boto3   # pyright: ignore[reportMissingImports]
+from botocore.client import Config  # pyright: ignore[reportMissingImports]
 from dotenv import load_dotenv
 
 load_dotenv()

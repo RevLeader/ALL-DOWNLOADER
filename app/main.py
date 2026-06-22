@@ -35,6 +35,7 @@ from app.auth import (
     create_session_token,
     require_login,
     is_logged_in,
+    get_user_id,
     COOKIE_NAME,
     COOKIE_MAX_AGE,
 )
@@ -136,8 +137,9 @@ class Mode(str, Enum):
 
 
 class Job:
-    def __init__(self, job_id: str, url: str, mode: Mode, options: dict):
+    def __init__(self, job_id: str, user_id: str, url: str, mode: Mode, options: dict):
         self.id = job_id
+        self.user_id = user_id
         self.url = url
         self.mode = mode
         self.options = options
@@ -184,7 +186,7 @@ class Job:
         """Upsert this job's current state into Postgres."""
         record = db.get(JobRecord, self.id)
         if record is None:
-            record = JobRecord(id=self.id)
+            record = JobRecord(id=self.id, user_id=self.user_id)
             db.add(record)
 
         record.url = self.url
@@ -208,7 +210,7 @@ class Job:
     @classmethod
     def from_record(cls, record: JobRecord) -> "Job":
         """Rehydrate a Job (for API responses) from a DB row."""
-        job = cls(record.id, record.url, record.mode, record.options or {})
+        job = cls(record.id, record.user_id, record.url, record.mode, record.options or {})
         job.status = record.status
         job.progress = record.progress or 0.0
         job.speed = record.speed
@@ -634,7 +636,7 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
         return
 
     try:
-        import pyzipper
+        import pyzipper # pyright: ignore[reportMissingImports]
 
         files_to_zip = []
         for root, _, files in os.walk(folder_path):
@@ -738,9 +740,10 @@ def auth_status(request: Request):
 # --------------------------------------------------------------------------
 
 @app.post("/api/jobs", dependencies=[Depends(require_login)])
-def create_job(req: DownloadRequest):
+def create_job(req: DownloadRequest, request: Request):
+    user_id = get_user_id(request)
     job_id = uuid.uuid4().hex[:10]
-    job = Job(job_id, req.url, req.mode, req.dict())
+    job = Job(job_id, user_id, req.url, req.mode, req.dict())
 
     with JOBS_LOCK:
         JOBS[job_id] = job
@@ -753,7 +756,8 @@ def create_job(req: DownloadRequest):
 
 
 @app.post("/api/jobs/batch", dependencies=[Depends(require_login)])
-def create_batch(batch: BatchRequest):
+def create_batch(batch: BatchRequest, request: Request):
+    user_id = get_user_id(request)
     lines = [
         line.strip()
         for line in batch.urls.splitlines()
@@ -781,13 +785,13 @@ def create_batch(batch: BatchRequest):
             cookies_file=batch.cookies_file,
             user_agent=batch.user_agent,
         )
-        j = create_job(req)
+        j = create_job(req, request)
         created.append(j)
         job_ids.append(j["id"])
 
     if batch.zip_when_done:
         zip_job_id = uuid.uuid4().hex[:10]
-        zip_job = Job(zip_job_id, f"Zip Process: {subfolder}.zip", Mode.ZIP_TASK, {})
+        zip_job = Job(zip_job_id, user_id, f"Zip Process: {subfolder}.zip", Mode.ZIP_TASK, {})
         with JOBS_LOCK:
             JOBS[zip_job_id] = zip_job
         _persist(zip_job)
@@ -803,19 +807,24 @@ def create_batch(batch: BatchRequest):
 
 
 @app.get("/api/jobs", dependencies=[Depends(require_login)])
-def list_jobs():
+def list_jobs(request: Request):
+    user_id = get_user_id(request)
     with JOBS_LOCK:
-        jobs = sorted(JOBS.values(), key=lambda j: j.created_at, reverse=True)
+        jobs = sorted(
+            (j for j in JOBS.values() if j.user_id == user_id),
+            key=lambda j: j.created_at, reverse=True,
+        )
         return [j.to_dict() for j in jobs]
 
 
 @app.delete("/api/jobs/clear-finished", dependencies=[Depends(require_login)])
-def clear_finished(db: Session = Depends(get_db)):
+def clear_finished(request: Request, db: Session = Depends(get_db)):
+    user_id = get_user_id(request)
     removed = 0
     with JOBS_LOCK:
         finished_ids = [
             jid for jid, j in JOBS.items()
-            if j.status in (JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED)
+            if j.user_id == user_id and j.status in (JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED)
         ]
         for jid in finished_ids:
             job = JOBS[jid]
@@ -833,20 +842,29 @@ def clear_finished(db: Session = Depends(get_db)):
     return {"removed": removed}
 
 
-@app.get("/api/jobs/{job_id}", dependencies=[Depends(require_login)])
-def get_job(job_id: str):
+def _get_owned_job(job_id: str, user_id: str) -> "Job":
+    """
+    Fetches a job only if it belongs to user_id. Returns 404 (not 403) for
+    a job that exists but belongs to someone else — same response as a
+    job_id that doesn't exist at all, so this never confirms or denies
+    that a given job_id belongs to another user.
+    """
     job = JOBS.get(job_id)
-    if not job:
+    if not job or job.user_id != user_id:
         raise HTTPException(404, "Job not found")
+    return job
+
+
+@app.get("/api/jobs/{job_id}", dependencies=[Depends(require_login)])
+def get_job(job_id: str, request: Request):
+    job = _get_owned_job(job_id, get_user_id(request))
     return job.to_dict()
 
 
 @app.get("/api/jobs/{job_id}/download", dependencies=[Depends(require_login)])
-def get_download_url(job_id: str):
+def get_download_url(job_id: str, request: Request):
     """Returns a pre-signed R2 URL (valid ~1hr) for the finished file."""
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
+    job = _get_owned_job(job_id, get_user_id(request))
     if not job.download_ready or not job.storage_key:
         raise HTTPException(409, "File isn't ready yet")
 
@@ -855,10 +873,8 @@ def get_download_url(job_id: str):
 
 
 @app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_login)])
-def delete_job(job_id: str, db: Session = Depends(get_db)):
-    job = JOBS.get(job_id)
-    if not job:
-        raise HTTPException(404, "Job not found")
+def delete_job(job_id: str, request: Request, db: Session = Depends(get_db)):
+    job = _get_owned_job(job_id, get_user_id(request))
 
     if job.status in (JobStatus.QUEUED, JobStatus.RUNNING):
         job.cancel_requested = True
@@ -877,12 +893,10 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @app.put("/api/jobs/{job_id}/retry", dependencies=[Depends(require_login)])
-def retry_job(job_id: str):
-    old = JOBS.get(job_id)
-    if not old:
-        raise HTTPException(404, "Job not found")
+def retry_job(job_id: str, request: Request):
+    old = _get_owned_job(job_id, get_user_id(request))
     req = DownloadRequest(**old.options)
-    return create_job(req)
+    return create_job(req, request)
 
 
 @app.get("/api/health")

@@ -49,6 +49,7 @@ class JobRecord(Base):
     __tablename__ = "jobs"
 
     id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)  # scopes jobs to a browser identity (see auth.py)
     url = Column(String, nullable=False)
     mode = Column(String, nullable=False)
     options = Column(JSON, default=dict)
@@ -75,6 +76,32 @@ class JobRecord(Base):
 def init_db():
     """Create tables if they don't exist yet. Safe to call on every startup."""
     Base.metadata.create_all(bind=engine)
+    _migrate_add_user_id()
+
+
+def _migrate_add_user_id():
+    """
+    create_all() only creates brand-new tables — it won't add a column to
+    a 'jobs' table that already exists from before user_id was introduced.
+    This adds it by hand if missing, so existing deployments don't crash
+    on startup or lose their job history. Old rows get a placeholder
+    user_id ('legacy') since we have no way to know who they belonged to;
+    they just won't show up under anyone's new per-browser identity.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "jobs" not in inspector.get_table_names():
+        return  # brand-new DB, create_all already made it correctly
+
+    columns = [col["name"] for col in inspector.get_columns("jobs")]
+    if "user_id" in columns:
+        return  # already migrated
+
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE jobs ADD COLUMN user_id VARCHAR"))
+        conn.execute(text("UPDATE jobs SET user_id = 'legacy' WHERE user_id IS NULL"))
+        conn.execute(text("ALTER TABLE jobs ALTER COLUMN user_id SET NOT NULL"))
 
 
 def get_db():

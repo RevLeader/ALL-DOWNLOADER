@@ -1,28 +1,44 @@
 """
 auth.py
 -------
-Simple shared-passphrase gate. Not per-user accounts — everyone you share
-the app with uses the same passphrase, set once via the APP_PASSPHRASE
-environment variable.
+Simple shared-passphrase gate, PLUS a private per-browser identity layered
+on top. Still just one passphrase for everyone (low friction — no sign-up
+forms), but each browser that logs in gets its own random, unguessable
+user_id baked into its session cookie. Job history is scoped to that
+user_id, so friends sharing the same passphrase don't see each other's
+downloads — similar to how a free web tool (audio trimmer, converter, etc.)
+gives every visitor their own private history with zero sign-up.
 
 How it works:
   1. POST /login with the passphrase -> if correct, we set a signed cookie
-     ("session") containing a marker that says "this browser is authed".
+     ("session") containing {"authed": True, "uid": "<random hex>"}.
+     A fresh random uid is generated once per successful login.
   2. The cookie is signed with itsdangerous using SECRET_KEY, so it can't
      be forged or edited by the client — but it isn't encrypted, so don't
-     put sensitive data inside it (we don't; it just says "ok").
+     put sensitive data inside it (we don't; uid is just an opaque id).
   3. A FastAPI dependency (require_login) checks for that cookie on every
      protected route and raises a redirect/401 if it's missing or invalid.
+     get_user_id() pulls the uid back out for scoping queries.
   4. Cookie expires after COOKIE_MAX_AGE seconds (default: 30 days), so
-     friends don't have to log in every single visit.
+     friends don't have to log in every single visit — and keep the SAME
+     uid (and therefore the same job history) across that whole period,
+     since the uid is only (re)generated at login time, not per request.
+
+LIMITATION: this is per-browser, not a real account. Clearing cookies,
+using a different browser, or switching to incognito means a "new" empty
+identity with no way to recover the old one's history. That's an
+intentional tradeoff for zero-friction entry — flagged so it's not a
+surprise later.
 """
 
 import os
 import hmac
+import secrets
+from typing import Optional
 
 from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired # pyright: ignore[reportMissingImports]
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -55,15 +71,25 @@ def check_passphrase(submitted: str) -> bool:
 
 
 def create_session_token() -> str:
-    return _serializer.dumps({"authed": True})
+    """
+    Called once, at successful login. Generates a fresh random user_id for
+    this browser and bakes it into the signed cookie alongside the auth
+    marker. token_hex(16) gives 128 bits of randomness — not guessable.
+    """
+    user_id = secrets.token_hex(16)
+    return _serializer.dumps({"authed": True, "uid": user_id})
+
+
+def _decode_session_token(token: str) -> Optional[dict]:
+    try:
+        return _serializer.loads(token, max_age=COOKIE_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return None
 
 
 def verify_session_token(token: str) -> bool:
-    try:
-        data = _serializer.loads(token, max_age=COOKIE_MAX_AGE)
-        return bool(data.get("authed"))
-    except (BadSignature, SignatureExpired):
-        return False
+    data = _decode_session_token(token)
+    return bool(data and data.get("authed"))
 
 
 def is_logged_in(request: Request) -> bool:
@@ -71,6 +97,24 @@ def is_logged_in(request: Request) -> bool:
     if not token:
         return False
     return verify_session_token(token)
+
+
+def get_user_id(request: Request) -> str:
+    """
+    Returns this browser's private user_id, pulled from the signed session
+    cookie. Use this to scope job queries/creation so people sharing the
+    same passphrase don't see each other's downloads.
+
+    Only call this on routes already behind require_login (or after
+    confirming is_logged_in) — it raises if there's no valid session,
+    since a missing uid should never silently fall through to showing
+    someone the wrong (or no) job list.
+    """
+    token = request.cookies.get(COOKIE_NAME)
+    data = _decode_session_token(token) if token else None
+    if not data or not data.get("uid"):
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return data["uid"]
 
 
 def require_login(request: Request):
