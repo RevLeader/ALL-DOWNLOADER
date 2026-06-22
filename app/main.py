@@ -279,13 +279,28 @@ class LoginRequest(BaseModel):
 # yt-dlp options builder
 # --------------------------------------------------------------------------
 
+def safe_subfolder(subfolder: Optional[str]) -> str:
+    """
+    Sanitizes a user-supplied subfolder name so it can't escape DOWNLOADS_DIR
+    (e.g. via '../../etc' or an absolute path). Strips path separators and
+    '..' segments, keeping only a flat folder name.
+    """
+    if not subfolder:
+        return ""
+    # Take just the final path component, discarding any directory traversal.
+    name = Path(subfolder).name
+    if name in ("", ".", ".."):
+        return ""
+    return name
+
+
 def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
-    out_dir = DOWNLOADS_DIR / (req.subfolder if req.subfolder else "")
+    out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    template = req.output_template or "%(title)s.%(ext)s"
+    template = req.output_template or "%(title).100B.%(ext)s"
     if req.mode in (Mode.PLAYLIST, Mode.PLAYLIST_RANGE) and not req.output_template:
-        template = "%(playlist_index)s - %(title)s.%(ext)s"
+        template = "%(playlist_index)s - %(title).100B.%(ext)s"
 
     job_logger = JobLogger(job)
     job._logger = job_logger
@@ -298,7 +313,11 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
-        "trim_file_name": 150,
+        # Hard backstop in case the title-field truncation above (.100B)
+        # still isn't enough once yt-dlp appends extra text (e.g. playlist
+        # index, uploader id). 120 chars leaves headroom under the 255-byte
+        # filesystem limit even with multi-byte emoji in the remainder.
+        "trim_file_name": 120,
 
         # NETWORK RESILIENCE:
         # float("inf") is the correct Python-API value for "retry forever".
@@ -462,7 +481,7 @@ def run_job(job: Job, req: DownloadRequest):
         # Download succeeded — now push the finished file to R2 so it
         # survives restarts/redeploys instead of sitting on ephemeral disk.
         if job.filename:
-            out_dir = DOWNLOADS_DIR / (req.subfolder if req.subfolder else "")
+            out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
             local_path = out_dir / job.filename
             if local_path.exists():
                 job.status = JobStatus.UPLOADING
@@ -476,10 +495,22 @@ def run_job(job: Job, req: DownloadRequest):
                     job.add_log("Upload complete. File ready to download.")
                     delete_local_file(str(local_path))
                 except Exception as upload_err:
-                    job.add_log(f"Warning: cloud upload failed ({upload_err}). "
-                                f"File remains on local disk only (may not survive a restart).")
+                    # Don't mark this DONE — the file isn't reachable from the
+                    # UI (no download_ready) and Render's disk is ephemeral,
+                    # so it'll vanish on next restart with no trace. Surface
+                    # it as an error instead so it's visible and retryable.
+                    job.status = JobStatus.ERROR
+                    job.error = f"Download succeeded but cloud upload failed: {upload_err}"
+                    job.add_log(f"Error: cloud upload failed ({upload_err}). "
+                                f"File is stuck on local disk and will be lost on next restart.")
+                    _persist(job)
+                    return
             else:
-                job.add_log(f"Warning: expected file '{job.filename}' not found on disk after download.")
+                job.status = JobStatus.ERROR
+                job.error = f"Expected file '{job.filename}' not found on disk after download."
+                job.add_log(f"Error: expected file '{job.filename}' not found on disk after download.")
+                _persist(job)
+                return
 
         job.status = JobStatus.DONE
         job.add_log("Done.")
@@ -565,7 +596,12 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
             zjob.filename = zip_path.name
             delete_local_file(str(zip_path))
         except Exception as upload_err:
-            zjob.add_log(f"Warning: cloud upload failed ({upload_err}). Zip remains on local disk only.")
+            zjob.status = JobStatus.ERROR
+            zjob.error = f"Zip created but cloud upload failed: {upload_err}"
+            zjob.add_log(f"Error: cloud upload failed ({upload_err}). "
+                         f"Zip is stuck on local disk and will be lost on next restart.")
+            _persist(zjob)
+            return
 
         zjob.status = JobStatus.DONE
         zjob.add_log(f"Done! Created encrypted zip: {zip_path.name}")
@@ -657,7 +693,7 @@ def create_batch(batch: BatchRequest):
     if not lines:
         raise HTTPException(400, "No URLs found in the list")
 
-    subfolder = batch.subfolder
+    subfolder = safe_subfolder(batch.subfolder)
     if batch.zip_when_done and not subfolder:
         subfolder = f"Batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
