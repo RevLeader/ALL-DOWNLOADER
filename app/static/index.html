@@ -999,7 +999,12 @@ async function downloadJob(jobId, btnEl) {
     const res = await api(`/api/jobs/${jobId}/download`);
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || 'File not ready'); }
     const data = await res.json();
-    window.open(data.url, '_blank');
+    if (data.local_only) {
+      // R2 upload failed — stream directly from server disk (temporary!)
+      window.location.href = `/api/jobs/${jobId}/download-local`;
+    } else {
+      window.open(data.url, '_blank');
+    }
   } catch (err) { console.error(err); }
   finally {
     downloadingUrls.delete(jobId);
@@ -1078,6 +1083,14 @@ function renderJobCard(job) {
     </div>`;
   }
 
+  // Upload-failed warning — shown when download succeeded but R2 upload failed
+  let uploadWarnHtml = '';
+  if (job.upload_failed) {
+    uploadWarnHtml = `<div class="job-error" style="background:rgba(232,163,61,0.12);border-color:var(--accent);color:var(--accent)">
+      ⚠ Cloud upload failed — file is on this server only. Download it now before the server restarts.
+    </div>`;
+  }
+
   // Error — stripped of technical noise
   let errorHtml = '';
   if (job.error) {
@@ -1115,6 +1128,7 @@ function renderJobCard(job) {
       ${renderMeterStrip(job)}
       ${statsHtml}
       ${fileHtml}
+      ${uploadWarnHtml}
       ${errorHtml}
     </div>`;
 }

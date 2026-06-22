@@ -38,7 +38,7 @@ from typing import Optional
 
 from fastapi import Request, HTTPException
 from fastapi.responses import RedirectResponse
-from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired # pyright: ignore[reportMissingImports]
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired  # pyright: ignore[reportMissingImports]
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,7 +67,7 @@ _serializer = URLSafeTimedSerializer(SECRET_KEY)
 
 def check_passphrase(submitted: str) -> bool:
     """Constant-time comparison to avoid leaking timing info about the correct passphrase."""
-    return hmac.compare_digest(submitted.strip(), APP_PASSPHRASE.strip())
+    return hmac.compare_digest(submitted.strip(), APP_PASSPHRASE.strip())  # type: ignore[arg-type]
 
 
 def create_session_token() -> str:
@@ -114,6 +114,22 @@ def get_user_id(request: Request) -> str:
     data = _decode_session_token(token) if token else None
     if not data or not data.get("uid"):
         raise HTTPException(status_code=401, detail="Not logged in")
+    return data["uid"]
+
+
+def get_user_id_from_token(token: str) -> str:
+    """
+    Extracts the uid directly from a token string (not from a Request object).
+    Used right after create_session_token() in the /api/login route, before
+    the cookie has been set in the browser, to kick off background tasks that
+    need the new uid (e.g. _claim_legacy_jobs).
+
+    Raises ValueError if the token is invalid (should never happen since
+    we just minted it, but defensive).
+    """
+    data = _decode_session_token(token)
+    if not data or not data.get("uid"):
+        raise ValueError("Invalid or expired token — cannot extract user_id")
     return data["uid"]
 
 

@@ -29,13 +29,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import init_db, get_db, JobRecord
-from app.storage import upload_file, delete_local_file, get_presigned_download_url, delete_from_bucket
+from app.storage import upload_file, delete_local_file, get_presigned_download_url, delete_from_bucket, UploadFailedError
 from app.auth import (
     check_passphrase,
     create_session_token,
     require_login,
     is_logged_in,
     get_user_id,
+    get_user_id_from_token,
     COOKIE_NAME,
     COOKIE_MAX_AGE,
 )
@@ -156,6 +157,8 @@ class Job:
         self.cancel_requested = False
         self.storage_key: Optional[str] = None
         self.download_ready = False
+        self.upload_failed = False          # True when R2 upload failed but file is still on disk
+        self.local_path: Optional[str] = None  # disk path for local-fallback download
         self._logger: Optional["JobLogger"] = None
 
     def add_log(self, line: str):
@@ -180,6 +183,7 @@ class Job:
             "error": self.error,
             "created_at": self.created_at.isoformat(),
             "download_ready": self.download_ready,
+            "upload_failed": self.upload_failed,
         }
 
     def persist(self, db: Session):
@@ -499,6 +503,62 @@ def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path
     return None
 
 
+def _upload_or_fallback(job: "Job", local_path: str):
+    """
+    Tries to upload local_path to R2 (storage.py retries up to 4× internally).
+    On success: marks job download-ready, deletes local file.
+    On UploadFailedError: marks job download-ready with upload_failed=True so
+    the frontend can still offer a direct-from-disk download while the file
+    exists (until next server restart).
+    """
+    try:
+        storage_key = upload_file(local_path, job.id, job.filename)
+        job.storage_key = storage_key
+        job.download_ready = True
+        job.upload_failed = False
+        job.local_path = None
+        job.add_log("Upload complete. File ready to download.")
+        delete_local_file(local_path)
+    except UploadFailedError as upload_err:
+        # Keep job as DONE — still show Download button, but stream locally
+        job.download_ready = True
+        job.upload_failed = True
+        job.local_path = local_path
+        job.add_log(
+            f"⚠ Cloud upload failed ({upload_err}). "
+            "File can still be downloaded directly from this server — "
+            "do it now, before the server restarts."
+        )
+
+
+def _claim_legacy_jobs(user_id: str):
+    """
+    Called once per new login session: reassigns any user_id='legacy' rows
+    (created before the per-browser identity system existed) to the new uid
+    so they appear in that person's job history.  Safe on every login — a
+    no-op when no legacy rows exist.
+    """
+    db = next(get_db())
+    try:
+        from sqlalchemy import text
+        result = db.execute(
+            text("UPDATE jobs SET user_id = :uid WHERE user_id = 'legacy'"),
+            {"uid": user_id},
+        )
+        db.commit()
+        if result.rowcount:
+            # Pull the newly claimed records into the in-memory JOBS map
+            records = db.query(JobRecord).filter_by(user_id=user_id).all()
+            with JOBS_LOCK:
+                for rec in records:
+                    if rec.id not in JOBS:
+                        JOBS[rec.id] = Job.from_record(rec)
+    except Exception:
+        pass   # not fatal
+    finally:
+        db.close()
+
+
 def run_job(job: Job, req: DownloadRequest):
     job.status = JobStatus.RUNNING
     job.add_log(f"Starting [{job.mode}] for: {job.url}")
@@ -532,23 +592,7 @@ def run_job(job: Job, req: DownloadRequest):
                 job.add_log("Uploading finished file to cloud storage...")
                 _persist(job)
 
-                try:
-                    storage_key = upload_file(str(local_path), job.id, job.filename)
-                    job.storage_key = storage_key
-                    job.download_ready = True
-                    job.add_log("Upload complete. File ready to download.")
-                    delete_local_file(str(local_path))
-                except Exception as upload_err:
-                    # Don't mark this DONE — the file isn't reachable from the
-                    # UI (no download_ready) and Render's disk is ephemeral,
-                    # so it'll vanish on next restart with no trace. Surface
-                    # it as an error instead so it's visible and retryable.
-                    job.status = JobStatus.ERROR
-                    job.error = f"Download succeeded but cloud upload failed: {upload_err}"
-                    job.add_log(f"Error: cloud upload failed ({upload_err}). "
-                                f"File is stuck on local disk and will be lost on next restart.")
-                    _persist(job)
-                    return
+                _upload_or_fallback(job, str(local_path))
             else:
                 # The hooks' tracked filename doesn't exist on disk — this
                 # can happen if postprocessing renamed/changed the extension
@@ -563,19 +607,7 @@ def run_job(job: Job, req: DownloadRequest):
                     job.add_log("Uploading finished file to cloud storage...")
                     _persist(job)
 
-                    try:
-                        storage_key = upload_file(str(fallback_path), job.id, job.filename)
-                        job.storage_key = storage_key
-                        job.download_ready = True
-                        job.add_log("Upload complete. File ready to download.")
-                        delete_local_file(str(fallback_path))
-                    except Exception as upload_err:
-                        job.status = JobStatus.ERROR
-                        job.error = f"Download succeeded but cloud upload failed: {upload_err}"
-                        job.add_log(f"Error: cloud upload failed ({upload_err}). "
-                                    f"File is stuck on local disk and will be lost on next restart.")
-                        _persist(job)
-                        return
+                    _upload_or_fallback(job, str(fallback_path))
                 else:
                     job.status = JobStatus.ERROR
                     job.error = f"Expected file '{job.filename}' not found on disk after download."
@@ -658,21 +690,10 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
 
         zjob.status = JobStatus.UPLOADING
         zjob.add_log("Uploading zip to cloud storage...")
+        zjob.filename = zip_path.name
         _persist(zjob)
 
-        try:
-            storage_key = upload_file(str(zip_path), zjob.id, zip_path.name)
-            zjob.storage_key = storage_key
-            zjob.download_ready = True
-            zjob.filename = zip_path.name
-            delete_local_file(str(zip_path))
-        except Exception as upload_err:
-            zjob.status = JobStatus.ERROR
-            zjob.error = f"Zip created but cloud upload failed: {upload_err}"
-            zjob.add_log(f"Error: cloud upload failed ({upload_err}). "
-                         f"Zip is stuck on local disk and will be lost on next restart.")
-            _persist(zjob)
-            return
+        _upload_or_fallback(zjob, str(zip_path))
 
         zjob.status = JobStatus.DONE
         zjob.add_log(f"Done! Created encrypted zip: {zip_path.name}")
@@ -721,6 +742,12 @@ def login(req: LoginRequest, response: Response):
         samesite="lax",
         secure=True,  # cookie only sent over HTTPS — Render serves you HTTPS by default
     )
+
+    # Reassign any pre-identity-system 'legacy' job rows to this browser's
+    # new uid so they appear in their history (runs in background — non-blocking).
+    uid = get_user_id_from_token(token)
+    threading.Thread(target=_claim_legacy_jobs, args=(uid,), daemon=True).start()
+
     return {"ok": True}
 
 
@@ -863,13 +890,56 @@ def get_job(job_id: str, request: Request):
 
 @app.get("/api/jobs/{job_id}/download", dependencies=[Depends(require_login)])
 def get_download_url(job_id: str, request: Request):
-    """Returns a pre-signed R2 URL (valid ~1hr) for the finished file."""
+    """
+    Returns a pre-signed R2 URL (valid ~1hr) for the finished file.
+    If the R2 upload failed but the file is still on local disk, returns
+    local_only=True so the frontend hits /download-local instead.
+    """
     job = _get_owned_job(job_id, get_user_id(request))
-    if not job.download_ready or not job.storage_key:
+    if not job.download_ready:
+        raise HTTPException(409, "File isn't ready yet")
+
+    if getattr(job, "upload_failed", False):
+        # File never made it to R2 — stream directly from local disk
+        local_path = getattr(job, "local_path", None)
+        if not local_path or not os.path.exists(local_path):
+            raise HTTPException(
+                410,
+                "File is no longer available (server was restarted before the cloud upload succeeded). "
+                "Please retry the job."
+            )
+        return {
+            "local_only": True,
+            "warning": "Cloud upload failed — file is available directly from this server until the next restart.",
+        }
+
+    if not job.storage_key:
         raise HTTPException(409, "File isn't ready yet")
 
     url = get_presigned_download_url(job.storage_key, filename=job.filename, expires_in=3600)
-    return {"url": url, "expires_in": 3600}
+    return {"url": url, "expires_in": 3600, "local_only": False}
+
+
+@app.get("/api/jobs/{job_id}/download-local", dependencies=[Depends(require_login)])
+def download_local(job_id: str, request: Request):
+    """
+    Streams the file directly from Render's local disk when the R2 upload
+    failed. Only available until the next server restart — after that the
+    file is gone and the user should retry the job.
+    """
+    job = _get_owned_job(job_id, get_user_id(request))
+    local_path = getattr(job, "local_path", None)
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(
+            410,
+            "File is no longer available locally (server was restarted). "
+            "Please retry the download job."
+        )
+    return FileResponse(
+        local_path,
+        filename=job.filename or "download",
+        media_type="application/octet-stream",
+    )
 
 
 @app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_login)])
