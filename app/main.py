@@ -16,13 +16,14 @@ import shutil
 import uuid
 import threading
 import time
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional, List, Dict
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -80,13 +81,13 @@ def auto_cookie_file(url: str) -> Optional[str]:
     exists on disk, otherwise None. Called automatically for every download
     so the user never has to think about it.
 
-    The source file (e.g. /etc/secrets/youtube.txt on Render) is read-only,
-    but yt-dlp sometimes rewrites the cookie jar mid-run (cookie rotation).
-    So we copy it into the writable downloads/ dir first and hand yt-dlp
-    that copy instead of the original.
+    Priority order:
+      1. Check the writable DOWNLOADS_DIR first — this is where cookies
+         uploaded via /api/cookies/upload endpoint are saved.
+      2. Fall back to the read-only COOKIES_DIR (e.g. /etc/secrets or
+         local cookies/ folder) and copy to downloads/ for yt-dlp's
+         potential cookie-rotation rewrites.
     """
-    if not COOKIES_DIR:
-        return None
     try:
         from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
@@ -95,14 +96,21 @@ def auto_cookie_file(url: str) -> Optional[str]:
         filename = DOMAIN_COOKIE_MAP.get(host)
         if not filename:
             return None
-        full_path = COOKIES_DIR / filename
-        if not full_path.exists():
-            return None
 
-        # Copy to writable downloads dir
+        # Priority 1: writable download dir (uploaded via API)
         writable = DOWNLOADS_DIR / filename
-        shutil.copy2(str(full_path), str(writable))
-        return str(writable)
+        if writable.exists():
+            return str(writable)
+
+        # Priority 2: read-only cookies dir (secret files / local folder)
+        if COOKIES_DIR:
+            full_path = COOKIES_DIR / filename
+            if full_path.exists():
+                # Copy to writable dir so yt-dlp can rewrite it if needed
+                shutil.copy2(str(full_path), str(writable))
+                return str(writable)
+
+        return None
     except Exception:
         return None
 
@@ -835,12 +843,46 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
 
 
 # --------------------------------------------------------------------------
+# Keep-alive pinger — prevents Render's free tier from spinning down
+# after 15 minutes of inactivity. Pings its own /api/health endpoint
+# every 10 minutes so the service stays warm.
+#
+# NOTE: This only works if the service is already running. If Render
+# spins it down completely, the thread stops too. For true 24/7 "wake",
+# pair this with an *external* cron job:
+#   cron-job.org (free) → https://yourapp.onrender.com/api/health
+# every 10 minutes. The external pinger wakes a sleeping instance; the
+# internal one keeps it awake once it's up.
+# --------------------------------------------------------------------------
+
+KEEPALIVE_INTERVAL = 600  # 10 minutes in seconds
+
+
+def _keepalive_pinger():
+    """Background thread that pings the app's health endpoint."""
+    while True:
+        time.sleep(KEEPALIVE_INTERVAL)
+        try:
+            # Use urllib (stdlib) instead of httpx to avoid adding deps
+            import urllib.request
+            port = os.environ.get("PORT", "10000")
+            url = f"http://localhost:{port}/api/health"
+            urllib.request.urlopen(url, timeout=10)
+        except Exception:
+            pass  # silently retry next cycle
+
+
+# --------------------------------------------------------------------------
 # Startup
 # --------------------------------------------------------------------------
 
 @app.on_event("startup")
 def on_startup():
     init_db()
+
+    # Start keep-alive pinger daemon thread
+    threading.Thread(target=_keepalive_pinger, daemon=True).start()
+
     # Rehydrate in-memory JOBS from the database so /api/jobs has history
     # immediately after a restart, instead of starting empty.
     db = next(get_db())
@@ -1109,6 +1151,137 @@ def retry_job(job_id: str, request: Request):
         clean["url"] = old.url
     req = DownloadRequest(**clean)
     return create_job(req, request)
+
+
+# --------------------------------------------------------------------------
+# Cookie management — upload fresh cookies and check status
+# --------------------------------------------------------------------------
+
+# Path where uploaded/temporary cookies are stored (writable)
+COOKIES_WRITABLE_DIR = DOWNLOADS_DIR
+COOKIES_WRITABLE_DIR.mkdir(exist_ok=True)
+
+# Map: domain -> filename in COOKIES_WRITABLE_DIR
+# Same as DOMAIN_COOKIE_MAP but these are the writable copies
+COOKIE_EXTRA_INFO_FILE = COOKIES_WRITABLE_DIR / "_cookie_meta.json"
+
+def _load_cookie_meta() -> dict:
+    """Load metadata about when each cookie file was last uploaded."""
+    try:
+        if COOKIE_EXTRA_INFO_FILE.exists():
+            return json.loads(COOKIE_EXTRA_INFO_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_cookie_meta(meta: dict):
+    """Save metadata about cookie upload times."""
+    try:
+        COOKIE_EXTRA_INFO_FILE.write_text(json.dumps(meta, indent=2, default=str))
+    except Exception:
+        pass
+
+@app.post("/api/cookies/upload", dependencies=[Depends(require_login)])
+async def upload_cookies(
+    request: Request,
+    file: UploadFile = File(...),
+    domain: str = Form("youtube.com"),
+):
+    """
+    Upload a fresh cookies file for a specific domain.
+    The file is saved to the writable cookies directory and replaces
+    the old cookie file for that domain.
+
+    - file: the cookies.txt / Netscape format cookie file
+    - domain: which site this is for (youtube.com, x.com, facebook.com, instagram.com)
+
+    Returns the domain, filename, and a note.
+    """
+    if file.filename is None:
+        raise HTTPException(400, "No filename in upload")
+
+    # Map the domain to the expected filename
+    domain_lower = domain.lower().strip()
+    cookie_filename = DOMAIN_COOKIE_MAP.get(domain_lower)
+    if not cookie_filename:
+        # Allow uploading custom cookie files too
+        valid_domains = ", ".join(sorted(set(DOMAIN_COOKIE_MAP.values())))
+        raise HTTPException(
+            400,
+            f"Unknown domain '{domain}'. Supported domains map to: {valid_domains}. "
+            f"Or pass a domain key like: youtube.com, x.com, facebook.com, instagram.com"
+        )
+
+    dest_path = COOKIES_WRITABLE_DIR / cookie_filename
+    content = await file.read()
+    dest_path.write_bytes(content)
+
+    # Record upload time
+    meta = _load_cookie_meta()
+    meta[domain_lower] = {
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "filename": cookie_filename,
+        "size_bytes": len(content),
+    }
+    _save_cookie_meta(meta)
+
+    return {
+        "ok": True,
+        "domain": domain_lower,
+        "filename": cookie_filename,
+        "path": str(dest_path),
+        "size_bytes": len(content),
+        "note": "Cookie file saved. It will be used automatically for future downloads from this domain."
+    }
+
+
+@app.get("/api/cookies/status", dependencies=[Depends(require_login)])
+def cookie_status():
+    """
+    Returns info about all known cookie files: which domains have cookies,
+    when they were last uploaded, and if they look like they might be expired.
+    """
+    meta = _load_cookie_meta()
+    result = {}
+    now = datetime.utcnow()
+
+    for domain, cookie_filename in DOMAIN_COOKIE_MAP.items():
+        info = meta.get(domain, {})
+
+        # Check if file exists in either writable dir or original cookies dir
+        writable_path = COOKIES_WRITABLE_DIR / cookie_filename
+        orig_path = (COOKIES_DIR / cookie_filename) if COOKIES_DIR else None
+        exists = writable_path.exists() or (orig_path and orig_path.exists())
+
+        uploaded_at_str = info.get("uploaded_at")
+        uploaded_at = None
+        age_days = None
+        expired = None
+
+        if uploaded_at_str:
+            try:
+                uploaded_at = datetime.fromisoformat(uploaded_at_str)
+                age_days = (now - uploaded_at).days
+                # Cookies typically expire after ~7-30 days depending on site
+                # Flag as "expiring" after 7 days, "expired" after 14
+                if age_days >= 14:
+                    expired = "expired"
+                elif age_days >= 7:
+                    expired = "expiring_soon"
+                else:
+                    expired = "fresh"
+            except Exception:
+                pass
+
+        result[domain] = {
+            "exists": exists,
+            "filename": cookie_filename,
+            "uploaded_at": uploaded_at_str,
+            "age_days": age_days,
+            "status": expired or ("no_file" if not exists else "unknown"),
+        }
+
+    return result
 
 
 @app.get("/api/health")

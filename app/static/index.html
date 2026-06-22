@@ -152,6 +152,53 @@ header {
 }
 .btn-logout:hover { color: var(--rec); border-color: var(--rec); }
 
+.btn-cookie {
+  background: transparent; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 7px 13px; font-family: var(--f-body); font-size: 11px; cursor: pointer;
+}
+.btn-cookie:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── COOKIE MODAL ── */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; z-index: 200;
+  background: rgba(0,0,0,0.5); align-items: center; justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.open { display: flex; }
+.modal-box {
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); padding: 24px;
+  max-width: 500px; width: 100%; max-height: 80vh; overflow-y: auto;
+}
+.modal-box h2 { font-family: var(--f-display); font-size: 15px; color: var(--tape); margin: 0 0 4px; }
+.modal-box .sub { font-size: 11px; color: var(--ink-faint); margin-bottom: 18px; }
+.modal-close {
+  float: right; background: transparent; border: none; color: var(--ink-faint);
+  font-size: 18px; cursor: pointer; padding: 0 4px;
+}
+.modal-close:hover { color: var(--tape); }
+
+.cookie-domain { margin-bottom: 16px; }
+.cookie-domain h3 { font-size: 12px; font-weight: 600; color: var(--tape); margin: 0 0 4px; }
+.cookie-domain .status { font-size: 11px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.cookie-badge {
+  font-size: 9.5px; padding: 1px 7px; border-radius: 8px;
+  text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600;
+}
+.cookie-badge.fresh { background: color-mix(in srgb, var(--go) 18%, transparent); color: var(--go); }
+.cookie-badge.expiring_soon { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.cookie-badge.expired { background: color-mix(in srgb, var(--rec) 18%, transparent); color: var(--rec); }
+.cookie-badge.no_file { background: var(--surface-raised); color: var(--ink-faint); }
+.cookie-badge.unknown { background: var(--surface-raised); color: var(--ink-faint); }
+.cookie-upload { margin-top: 8px; }
+.cookie-upload input[type="file"] { font-size: 11px; color: var(--ink-dim); }
+.cookie-upload .upload-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.cookie-upload .upload-row button { flex-shrink: 0; }
+.cookie-msg { font-size: 11px; margin-top: 6px; min-height: 14px; }
+.cookie-msg.ok { color: var(--go); }
+.cookie-msg.error { color: var(--rec); }
+
 /* ── SESSION STATS BAR ── */
 .stats-bar {
   display: flex; gap: 0; padding: 0 22px;
@@ -561,6 +608,7 @@ details.optional summary::-webkit-details-marker { display: none; }
       DECK <small id="version-text">connecting…</small>
     </div>
     <div class="header-right">
+      <button class="btn-cookie" id="cookie-btn" title="Manage site logins (cookies)">🍪 Cookies</button>
       <div class="theme-picker">
         <button class="theme-btn" id="theme-btn" aria-label="Change theme">
           <span class="theme-swatch"></span> Theme
@@ -1358,6 +1406,139 @@ function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(refreshJobs, POLL_INTERVAL_MS);
 }
+
+// ── Cookie management modal ──
+const COOKIE_DOMAINS = [
+  { key: 'youtube.com', label: 'YouTube' },
+  { key: 'x.com', label: 'X / Twitter' },
+  { key: 'facebook.com', label: 'Facebook' },
+  { key: 'instagram.com', label: 'Instagram' },
+];
+
+let cookieModalHtml = '';
+function buildCookieModal() {
+  cookieModalHtml = `
+    <div class="modal-overlay" id="cookie-modal">
+      <div class="modal-box">
+        <button class="modal-close" onclick="closeCookieModal()">&times;</button>
+        <h2>🍪 Site Logins</h2>
+        <div class="sub">Upload fresh cookies to keep downloads working. Cookies expire every 1–2 weeks.
+        <br>To get cookies: install a browser extension like "Get cookies.txt" (for Chrome/Edge) or "cookies.txt" (for Firefox)
+        on your phone or computer, go to the site, export cookies, and upload them below.</div>
+        <div id="cookie-domains-list"></div>
+        <div id="cookie-modal-msg" class="cookie-msg" style="text-align:center;margin-top:12px"></div>
+        <button class="btn-go" style="margin-top:14px;font-size:11px;padding:10px" onclick="closeCookieModal()">Done</button>
+      </div>
+    </div>`;
+}
+
+function openCookieModal() {
+  buildCookieModal();
+  // Insert modal into DOM
+  const existing = document.getElementById('cookie-modal');
+  if (existing) existing.remove();
+  document.body.insertAdjacentHTML('beforeend', cookieModalHtml);
+  document.getElementById('cookie-modal').classList.add('open');
+  refreshCookieStatus();
+}
+
+function closeCookieModal() {
+  const modal = document.getElementById('cookie-modal');
+  if (modal) { modal.classList.remove('open'); modal.remove(); }
+}
+
+async function refreshCookieStatus() {
+  const list = document.getElementById('cookie-domains-list');
+  if (!list) return;
+  list.innerHTML = '<div style="text-align:center;color:var(--ink-faint);padding:20px">Checking cookie status…</div>';
+
+  try {
+    const res = await api('/api/cookies/status');
+    const data = await res.json();
+    list.innerHTML = COOKIE_DOMAINS.map(d => renderCookieDomain(d, data[d.key])).join('');
+  } catch (err) {
+    list.innerHTML = '<div style="text-align:center;color:var(--rec);padding:20px">Could not check cookie status.</div>';
+  }
+}
+
+function renderCookieDomain(domain, info) {
+  const statusClass = (info && info.status) || 'no_file';
+  const statusLabel = {
+    fresh: 'Fresh',
+    expiring_soon: 'Expiring soon',
+    expired: 'Expired',
+    no_file: 'No cookies',
+    unknown: 'Unknown',
+  }[statusClass] || 'Unknown';
+
+  let ageText = '';
+  if (info && info.age_days !== undefined && info.age_days !== null) {
+    ageText = info.age_days === 0 ? ' (uploaded today)' : ` (${info.age_days} day${info.age_days === 1 ? '' : 's'} ago)`;
+  }
+
+  return `
+    <div class="cookie-domain">
+      <h3>${escapeHtml(domain.label)} (${escapeHtml(domain.key)})</h3>
+      <div class="status">
+        <span class="cookie-badge ${statusClass}">${statusLabel}</span>
+        <span style="color:var(--ink-faint);font-size:10.5px">${ageText}</span>
+      </div>
+      <div class="cookie-upload">
+        <input type="file" accept=".txt,.json" id="cookie-file-${domain.key}" style="font-size:11px">
+        <div class="upload-row">
+          <button type="button" class="icon-btn" onclick="uploadCookie('${domain.key}')">Upload</button>
+        </div>
+        <div class="cookie-msg" id="cookie-msg-${domain.key}"></div>
+      </div>
+    </div>`;
+}
+
+async function uploadCookie(domain) {
+  const fileInput = document.getElementById(`cookie-file-${domain}`);
+  const msg = document.getElementById(`cookie-msg-${domain}`);
+  if (!fileInput || !msg) return;
+
+  const file = fileInput.files[0];
+  if (!file) {
+    msg.textContent = 'Select a cookie file first.';
+    msg.className = 'cookie-msg error';
+    return;
+  }
+
+  msg.textContent = 'Uploading…';
+  msg.className = 'cookie-msg';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('domain', domain);
+
+    const res = await fetch('/api/cookies/upload', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Upload failed');
+    }
+
+    msg.textContent = '✓ Cookie file saved — will be used for future downloads.';
+    msg.className = 'cookie-msg ok';
+    fileInput.value = '';
+    // Refresh status after a moment
+    setTimeout(refreshCookieStatus, 1000);
+  } catch (err) {
+    msg.textContent = err.message || 'Upload failed.';
+    msg.className = 'cookie-msg error';
+  }
+}
+
+// Wire up cookie button
+document.addEventListener('DOMContentLoaded', () => {
+  const cookieBtn = document.getElementById('cookie-btn');
+  if (cookieBtn) cookieBtn.addEventListener('click', openCookieModal);
+});
 
 // ── Init ──
 (async function init() {
