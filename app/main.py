@@ -1,16 +1,3 @@
-"""
-yt-dlp GUI backend
--------------------
-A FastAPI wrapper around yt-dlp that turns your cheat sheet commands into
-clickable buttons + API endpoints.
-
-This version adds:
-  - Postgres persistence (via Neon) so job history survives restarts
-  - Cloudflare R2 storage so finished files survive restarts/redeploys
-  - A shared-passphrase login gate so only people you've shared the
-    passphrase with can use the app
-"""
-
 import os
 import shutil
 import uuid
@@ -54,23 +41,12 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 cookie_refresher = CookieRefresher(cookies_dir=DOWNLOADS_DIR)
 cookie_refresher.start()
 
-# Cookies directory — checked automatically based on the URL's domain.
-# On Render: upload cookie files as Secret Files under Environment → Secret Files.
-# Locally: put them in a cookies/ folder next to main.py (add cookies/ to .gitignore).
-# File naming convention:
-#   youtube.txt   → used for youtube.com, youtu.be
-#   x.txt         → used for x.com, twitter.com
-#   facebook.txt  → used for facebook.com, fb.watch
-#   instagram.txt → used for instagram.com
-# Add more as needed following the same pattern.
 COOKIES_DIR_CANDIDATES = [
-    Path("/etc/secrets"),          # Render Secret Files location
-    APP_DIR / "cookies",           # local dev folder
+    Path("/etc/secrets"),
+    APP_DIR / "cookies",
 ]
 COOKIES_DIR = next((p for p in COOKIES_DIR_CANDIDATES if p.exists()), None)
 
-# Phrases that indicate YouTube bot-detection fired. Checked in run_job() after
-# a DownloadError to decide whether to trigger an immediate cookie refresh.
 _BOT_ERROR_PHRASES = [
     "sign in to confirm",
     "confirm you're not a bot",
@@ -79,9 +55,6 @@ _BOT_ERROR_PHRASES = [
     "too many requests",
 ]
 
-# Files that live in DOWNLOADS_DIR for system/housekeeping purposes and must
-# never be mistaken for a completed video download by _find_recently_written_file.
-# Populated after DOMAIN_COOKIE_MAP is defined below.
 _DOWNLOADS_DIR_SYSTEM_FILES: set[str] = {"archive.txt", "_cookie_meta.json"}
 
 DOMAIN_COOKIE_MAP = {
@@ -93,42 +66,24 @@ DOMAIN_COOKIE_MAP = {
     "fb.watch":      "facebook.txt",
     "instagram.com": "instagram.txt",
 }
-# Include all cookie filenames so _find_recently_written_file never mistakes them
-# for downloaded videos (they share the same DOWNLOADS_DIR).
 _DOWNLOADS_DIR_SYSTEM_FILES.update(set(DOMAIN_COOKIE_MAP.values()))
 
 def auto_cookie_file(url: str) -> Optional[str]:
-    """
-    Returns the path to a cookies file for the given URL's domain if one
-    exists on disk, otherwise None. Called automatically for every download
-    so the user never has to think about it.
-
-    Priority order:
-      1. Check the writable DOWNLOADS_DIR first — this is where cookies
-         uploaded via /api/cookies/upload endpoint are saved.
-      2. Fall back to the read-only COOKIES_DIR (e.g. /etc/secrets or
-         local cookies/ folder) and copy to downloads/ for yt-dlp's
-         potential cookie-rotation rewrites.
-    """
     try:
         from urllib.parse import urlparse
         host = urlparse(url).hostname or ""
-        # Strip www. prefix so www.youtube.com matches youtube.com
         host = host.removeprefix("www.")
         filename = DOMAIN_COOKIE_MAP.get(host)
         if not filename:
             return None
 
-        # Priority 1: writable download dir (uploaded via API)
         writable = DOWNLOADS_DIR / filename
         if writable.exists():
             return str(writable)
 
-        # Priority 2: read-only cookies dir (secret files / local folder)
         if COOKIES_DIR:
             full_path = COOKIES_DIR / filename
             if full_path.exists():
-                # Copy to writable dir so yt-dlp can rewrite it if needed
                 shutil.copy2(str(full_path), str(writable))
                 return str(writable)
 
@@ -138,11 +93,6 @@ def auto_cookie_file(url: str) -> Optional[str]:
 
 app = FastAPI(title="yt-dlp GUI", description="Local control panel for yt-dlp")
 
-# Run-time job state lives here (fast, lock-protected, no DB round-trip per
-# progress tick). Each Job is synced to Postgres at the meaningful
-# checkpoints: creation, finished/error/cancelled, and final file-ready.
-# This avoids hammering the database tens of times a second while a
-# progress bar updates, while still giving you durable history.
 JOBS: Dict[str, "Job"] = {}
 JOBS_LOCK = threading.Lock()
 
@@ -150,7 +100,7 @@ JOBS_LOCK = threading.Lock()
 class JobStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
-    UPLOADING = "uploading"   # new: finished downloading, now pushing to R2
+    UPLOADING = "uploading"
     DONE = "done"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -175,7 +125,7 @@ class Job:
         self.mode = mode
         self.options = options
         self.status = JobStatus.QUEUED
-        self.progress: float = 0.0          # 0-100
+        self.progress: float = 0.0          
         self.speed: Optional[str] = None
         self.eta: Optional[str] = None
         self.filename: Optional[str] = None
@@ -187,8 +137,8 @@ class Job:
         self.cancel_requested = False
         self.storage_key: Optional[str] = None
         self.download_ready = False
-        self.upload_failed = False          # True when R2 upload failed but file is still on disk
-        self.local_path: Optional[str] = None  # disk path for local-fallback download
+        self.upload_failed = False          
+        self.local_path: Optional[str] = None  
         self._logger: Optional["JobLogger"] = None
 
     def add_log(self, line: str):
@@ -219,7 +169,6 @@ class Job:
         }
 
     def persist(self, db: Session):
-        """Upsert this job's current state into Postgres."""
         record = db.get(JobRecord, self.id)
         if record is None:
             record = JobRecord(id=self.id, user_id=self.user_id)
@@ -245,7 +194,6 @@ class Job:
 
     @classmethod
     def from_record(cls, record: JobRecord) -> "Job":
-        """Rehydrate a Job (for API responses) from a DB row."""
         job = cls(record.id, record.user_id, record.url, record.mode, record.options or {})
         job.status = record.status
         job.progress = record.progress or 0.0
@@ -264,17 +212,12 @@ class Job:
 
 
 def _persist(job: "Job"):
-    """Helper to persist a job from inside the background thread (own DB session)."""
     db = next(get_db())
     try:
         job.persist(db)
     finally:
         db.close()
 
-
-# --------------------------------------------------------------------------
-# Request schema
-# --------------------------------------------------------------------------
 
 class DownloadRequest(BaseModel):
     url: Optional[str] = Field(None, description="Video/playlist URL")
@@ -287,7 +230,6 @@ class DownloadRequest(BaseModel):
     subfolder: Optional[str] = None
     playlist_start: Optional[int] = None
     playlist_end: Optional[int] = None
-    # Legacy fields — ignored; kept so older clients don't 422
     search_first: bool = False
     search_count: int = 1
     filter_keywords: Optional[str] = None
@@ -297,7 +239,6 @@ class DownloadRequest(BaseModel):
     raw_args: Optional[str] = None
 
     def effective_input(self) -> tuple[str, bool]:
-        """Returns (input_text, is_search)."""
         search = (self.search_query or "").strip()
         if search:
             return search, True
@@ -327,19 +268,9 @@ class LoginRequest(BaseModel):
     passphrase: str
 
 
-# --------------------------------------------------------------------------
-# yt-dlp options builder
-# --------------------------------------------------------------------------
-
 def safe_subfolder(subfolder: Optional[str]) -> str:
-    """
-    Sanitizes a user-supplied subfolder name so it can't escape DOWNLOADS_DIR
-    (e.g. via '../../etc' or an absolute path). Strips path separators and
-    '..' segments, keeping only a flat folder name.
-    """
     if not subfolder:
         return ""
-    # Take just the final path component, discarding any directory traversal.
     name = Path(subfolder).name
     if name in ("", ".", ".."):
         return ""
@@ -366,17 +297,7 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         "quiet": True,
         "no_warnings": True,
         "ignoreerrors": True,
-        # Hard backstop in case the title-field truncation above (.100B)
-        # still isn't enough once yt-dlp appends extra text (e.g. playlist
-        # index, uploader id). 120 chars leaves headroom under the 255-byte
-        # filesystem limit even with multi-byte emoji in the remainder.
         "trim_file_name": 120,
-
-        # NETWORK RESILIENCE:
-        # float("inf") is the correct Python-API value for "retry forever".
-        # The string "infinite" only works as a CLI flag (argparse converts
-        # it before it reaches yt-dlp's internals) — passed directly through
-        # the Python API it causes a crash comparing int to str.
         "retries": float("inf"),
         "fragment_retries": float("inf"),
         "file_access_retries": float("inf"),
@@ -390,13 +311,8 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
         opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "0"}]
     else:
         if req.resolution:
-            # Try the requested height first, then progressively fall back to lower
-            # resolutions rather than erroring when the exact height isn't available
-            # (e.g. a reel that only offers 720p when 1080p was requested).
             h = req.resolution
             fallbacks = [h, 1080, 720, 480, 360] if h > 360 else [h, 360]
-            # Build a chain: bestvideo[height<=X]+bestaudio / best[height<=X]
-            # for each fallback height, deduplicated while preserving order.
             seen = set()
             parts = []
             for fh in fallbacks:
@@ -407,7 +323,7 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
                         f"bestvideo[height<={fh}]+bestaudio/"
                         f"best[height<={fh}]"
                     )
-            parts.append("bestvideo+bestaudio/best")  # final catch-all
+            parts.append("bestvideo+bestaudio/best")  
             opts["format"] = "/".join(parts)
         else:
             opts["format"] = "bestvideo+bestaudio/best"
@@ -435,11 +351,6 @@ def build_ydl_opts(job: Job, req: DownloadRequest) -> dict:
     if req.mode == Mode.X and not req.output_template:
         opts["outtmpl"] = str(out_dir / "%(uploader_id)s_%(id)s.%(ext)s")
 
-    # ── Cookie auto-injection ──
-    # Checks for cookie files in this priority:
-    #   1. Writable downloads/ dir (uploaded via /api/cookies/upload)
-    #   2. Render Secret Files (/etc/secrets) or local cookies/ folder
-    # The right cookie file is selected based on the URL's domain.
     resolved_cookie = auto_cookie_file(job.url)
     if resolved_cookie:
         opts["cookiefile"] = resolved_cookie
@@ -475,17 +386,15 @@ class JobLogger:
         self.job.add_log(msg)
 
     def warning(self, msg):
-        # Suppress noisy-but-harmless cookie warnings (expired entries, missing
-        # columns, etc.) — they don't affect the download and just confuse users.
         cookie_noise = (
             "Couldn't decrypt cookie",
             "unable to open database",
             "KeyError: 'expirationDate'",
-            "cookie",         # broad — catches "cookies file", "cookie jar", etc.
+            "cookie",         
             "sqlite",
         )
         if any(kw.lower() in msg.lower() for kw in cookie_noise):
-            return   # swallow silently
+            return   
         if "Retrying" in msg or "Giving up after" in msg:
             self.job.add_log(f"Network issue/interruption: {msg} (Will keep retrying)")
         else:
@@ -495,8 +404,6 @@ class JobLogger:
         if "max-downloads" in msg or "Maximum number of downloads reached" in msg:
             self.job.add_log(f"Stopped after first match (by design): {msg}")
             return
-        # Suppress cookie-related errors — they're usually non-fatal (expired
-        # session, missing file) and yt-dlp will continue without them.
         cookie_noise = (
             "Couldn't decrypt cookie",
             "unable to open database",
@@ -505,7 +412,7 @@ class JobLogger:
         )
         if any(kw.lower() in msg.lower() for kw in cookie_noise):
             self.job.add_log(f"Note: cookie issue (continuing without saved login): {msg}")
-            return   # don't mark job as errored
+            return   
         self.had_error = True
         self.last_error = msg
         self.job.add_log(f"Error: {msg}")
@@ -527,13 +434,6 @@ def _progress_hook(job: Job, d: dict):
             job.progress = downloaded / total * 100
         job.speed = d.get("_speed_str", "").strip() or None
         job.eta = d.get("_eta_str", "").strip() or None
-        # NOTE: this filename is a snapshot taken *during* download, before
-        # postprocessing (merge, thumbnail embed, metadata) runs. It can be
-        # wrong by the time the job finishes — e.g. postprocessing remuxes
-        # a .webm fragment into .mp4, or falls back to .m4a if no video
-        # stream merged. We still set it here for live progress display,
-        # but the postprocessor hook below overwrites it with the real
-        # final filename once processing actually completes.
         fname = d.get("filename")
         if fname:
             job.filename = os.path.basename(fname)
@@ -544,13 +444,6 @@ def _progress_hook(job: Job, d: dict):
 
 
 def _postprocessor_hook(job: Job, d: dict):
-    """
-    Fires after each postprocessor step (merge, thumbnail embed, metadata).
-    'filepath' here is yt-dlp's own authoritative answer for the file's
-    current location/name — more trustworthy than the download-time
-    snapshot from _progress_hook, since postprocessing can change the
-    extension or filename after that snapshot was taken.
-    """
     if d.get("status") == "finished":
         info = d.get("info_dict") or {}
         filepath = info.get("filepath") or d.get("filepath")
@@ -563,26 +456,15 @@ def _postprocessor_hook(job: Job, d: dict):
                 job.options["display_title"] = title
 
 
-# --------------------------------------------------------------------------
-# Workers (Download, Upload-to-R2, & Zip)
-# --------------------------------------------------------------------------
-
 def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path]:
-    """
-    Looks for a file in out_dir written after the job started.
-    When several candidates exist, returns the newest one.
-    """
     if not out_dir.exists():
         return None
-    since_ts = since.timestamp() - 2  # small clock slack
+    since_ts = since.timestamp() - 2  
     skip_extensions = {".part", ".ytdl", ".tmp"}
     candidates = [
         f for f in out_dir.iterdir()
         if f.is_file()
         and f.stat().st_mtime >= since_ts
-        # Exclude known system files that share DOWNLOADS_DIR (cookie files,
-        # meta JSON, archive lists). Without this, a cookie file written by
-        # the background refresher gets mistaken for the downloaded video.
         and f.name not in _DOWNLOADS_DIR_SYSTEM_FILES
         and not any(f.name.endswith(ext) for ext in skip_extensions)
     ]
@@ -594,7 +476,6 @@ def _find_recently_written_file(out_dir: Path, since: datetime) -> Optional[Path
 
 
 def _locate_output_file(job: "Job", out_dir: Path) -> Optional[Path]:
-    """Find the finished download on disk using tracked name or mtime fallback."""
     if job.filename:
         candidate = out_dir / job.filename
         if candidate.exists():
@@ -616,10 +497,6 @@ def _was_archive_skipped(job: "Job") -> bool:
 
 
 def _resolve_youtube_search(query: str, cookiefile: Optional[str] = None) -> dict:
-    """
-    Search YouTube and return the top result's URL and title.
-    Uses ytsearch1 so we always pick the best-ranked official match.
-    """
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
@@ -649,11 +526,6 @@ def _resolve_youtube_search(query: str, cookiefile: Optional[str] = None) -> dic
 
 
 def _prepare_download_request(job: "Job", req: DownloadRequest) -> tuple[DownloadRequest, str]:
-    """
-    Resolves YouTube search queries to a concrete video URL and stores the
-    real YouTube title on the job for display.
-    Returns (updated_request, download_url).
-    """
     try:
         input_text, is_search = req.effective_input()
     except ValueError as exc:
@@ -676,13 +548,6 @@ def _prepare_download_request(job: "Job", req: DownloadRequest) -> tuple[Downloa
 
 
 def _upload_or_fallback(job: "Job", local_path: str):
-    """
-    Tries to upload local_path to R2 (storage.py retries up to 4× internally).
-    On success: marks job download-ready, deletes local file.
-    On UploadFailedError: marks job download-ready with upload_failed=True so
-    the frontend can still offer a direct-from-disk download while the file
-    exists (until next server restart).
-    """
     try:
         storage_key = upload_file(local_path, job.id, job.filename)
         job.storage_key = storage_key
@@ -692,7 +557,6 @@ def _upload_or_fallback(job: "Job", local_path: str):
         job.add_log("Upload complete. File ready to download.")
         delete_local_file(local_path)
     except UploadFailedError as upload_err:
-        # Keep job as DONE — still show Download button, but stream locally
         job.download_ready = True
         job.upload_failed = True
         job.local_path = local_path
@@ -704,12 +568,6 @@ def _upload_or_fallback(job: "Job", local_path: str):
 
 
 def _claim_legacy_jobs(user_id: str):
-    """
-    Called once per new login session: reassigns any user_id='legacy' rows
-    (created before the per-browser identity system existed) to the new uid
-    so they appear in that person's job history.  Safe on every login — a
-    no-op when no legacy rows exist.
-    """
     db = next(get_db())
     try:
         from sqlalchemy import text
@@ -719,14 +577,13 @@ def _claim_legacy_jobs(user_id: str):
         )
         db.commit()
         if result.rowcount:
-            # Pull the newly claimed records into the in-memory JOBS map
             records = db.query(JobRecord).filter_by(user_id=user_id).all()
             with JOBS_LOCK:
                 for rec in records:
                     if rec.id not in JOBS:
                         JOBS[rec.id] = Job.from_record(rec)
     except Exception:
-        pass   # not fatal
+        pass   
     finally:
         db.close()
 
@@ -736,72 +593,89 @@ def run_job(job: Job, req: DownloadRequest):
     job.add_log(f"Starting [{job.mode}] for: {job.url}")
     _persist(job)
 
-    try:
-        req, download_url = _prepare_download_request(job, req)
-        opts = build_ydl_opts(job, req)
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([download_url])
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        try:
+            req, download_url = _prepare_download_request(job, req)
+            opts = build_ydl_opts(job, req)
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([download_url])
 
-        if job.cancel_requested:
-            job.status = JobStatus.CANCELLED
-            job.add_log("Cancelled.")
-            _persist(job)
-            return
+            if job.cancel_requested:
+                job.status = JobStatus.CANCELLED
+                job.add_log("Cancelled.")
+                _persist(job)
+                return
 
-        if job._logger and job._logger.had_error:
-            job.status = JobStatus.ERROR
-            job.error = job._logger.last_error
-            job.add_log("Finished with errors — see log above.")
-            _persist(job)
-            return
-
-        out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
-        local_path = _locate_output_file(job, out_dir)
-
-        if not local_path:
-            if _was_archive_skipped(job):
+            if job._logger and job._logger.had_error:
                 job.status = JobStatus.ERROR
-                job.error = (
-                    "This video was skipped because it was downloaded before. "
-                    "Uncheck “Skip videos already downloaded” to download it again."
-                )
+                job.error = job._logger.last_error
+                job.add_log("Finished with errors — see log above.")
+                _persist(job)
+                return
+
+            out_dir = DOWNLOADS_DIR / safe_subfolder(req.subfolder)
+            local_path = _locate_output_file(job, out_dir)
+
+            if not local_path:
+                if _was_archive_skipped(job):
+                    job.status = JobStatus.ERROR
+                    job.error = (
+                        "This video was skipped because it was downloaded before. "
+                        "Uncheck “Skip videos already downloaded” to download it again."
+                    )
+                else:
+                    job.status = JobStatus.ERROR
+                    job.error = "Download finished but no output file was found."
+                job.add_log(f"Error: {job.error}")
+                _persist(job)
+                return
+
+            job.status = JobStatus.UPLOADING
+            job.add_log("Uploading finished file to cloud storage...")
+            _persist(job)
+            _upload_or_fallback(job, str(local_path))
+
+            job.status = JobStatus.DONE
+            job.add_log("Done.")
+            _persist(job)
+            return
+
+        except yt_dlp.utils.DownloadError as e:
+            if job.cancel_requested:
+                job.status = JobStatus.CANCELLED
+                job.add_log("Cancelled.")
+                _persist(job)
+                return
+            
+            is_bot_error = any(p in str(e).lower() for p in _BOT_ERROR_PHRASES)
+            if is_bot_error and attempt < max_attempts:
+                job.add_log("⚠ Bot check detected — auto-refreshing cookies and retrying immediately...")
+                try:
+                    from app.cookie_refresher import refresh_cookies
+                    refresh_cookies(DOWNLOADS_DIR, force=True)
+                    job.add_log("Cookies refreshed. Retrying download...")
+                except ImportError:
+                    job.add_log("Cannot perform synchronous refresh without app.cookie_refresher. Retrying anyway...")
+                continue
             else:
                 job.status = JobStatus.ERROR
-                job.error = "Download finished but no output file was found."
-            job.add_log(f"Error: {job.error}")
-            _persist(job)
-            return
-
-        job.status = JobStatus.UPLOADING
-        job.add_log("Uploading finished file to cloud storage...")
-        _persist(job)
-        _upload_or_fallback(job, str(local_path))
-
-        job.status = JobStatus.DONE
-        job.add_log("Done.")
-        _persist(job)
-
-    except yt_dlp.utils.DownloadError as e:
-        if job.cancel_requested:
-            job.status = JobStatus.CANCELLED
-            job.add_log("Cancelled.")
-        else:
+                job.error = str(e)
+                job.add_log(f"Error: {e}")
+                if is_bot_error:
+                    job.add_log("⚠ Bot check detected — refreshing cookies in background. Retry this job later.")
+                    cookie_refresher.force_refresh()
+                _persist(job)
+                return
+        except Exception as e:
             job.status = JobStatus.ERROR
             job.error = str(e)
-            job.add_log(f"Error: {e}")
-            if any(p in str(e).lower() for p in _BOT_ERROR_PHRASES):
-                job.add_log("⚠ Bot check detected — refreshing cookies in background. Retry this job in ~30s.")
-                cookie_refresher.force_refresh()
-        _persist(job)
-    except Exception as e:
-        job.status = JobStatus.ERROR
-        job.error = str(e)
-        job.add_log(f"Unexpected error: {e}")
-        _persist(job)
+            job.add_log(f"Unexpected error: {e}")
+            _persist(job)
+            return
 
 
 def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: str, password: Optional[str]):
-    """Background thread that monitors a batch of downloads and zips them when all complete."""
     while True:
         with JOBS_LOCK:
             statuses = [JOBS[jid].status for jid in target_job_ids if jid in JOBS]
@@ -833,7 +707,7 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
         return
 
     try:
-        import pyzipper # pyright: ignore[reportMissingImports]
+        import pyzipper
 
         files_to_zip = []
         for root, _, files in os.walk(folder_path):
@@ -870,49 +744,23 @@ def watch_batch_and_zip(target_job_ids: List[str], zip_job_id: str, subfolder: s
         _persist(zjob)
 
 
-# --------------------------------------------------------------------------
-# Keep-alive pinger — prevents Render's free tier from spinning down
-# after 15 minutes of inactivity. Pings its own /api/health endpoint
-# every 10 minutes so the service stays warm.
-#
-# NOTE: This only works if the service is already running. If Render
-# spins it down completely, the thread stops too. For true 24/7 "wake",
-# pair this with an *external* cron job:
-#   cron-job.org (free) → https://yourapp.onrender.com/api/health
-# every 10 minutes. The external pinger wakes a sleeping instance; the
-# internal one keeps it awake once it's up.
-# --------------------------------------------------------------------------
-
-KEEPALIVE_INTERVAL = 600  # 10 minutes in seconds
-
+KEEPALIVE_INTERVAL = 600  
 
 def _keepalive_pinger():
-    """Background thread that pings the app's health endpoint."""
     while True:
         time.sleep(KEEPALIVE_INTERVAL)
         try:
-            # Use urllib (stdlib) instead of httpx to avoid adding deps
             import urllib.request
             port = os.environ.get("PORT", "10000")
             url = f"http://localhost:{port}/api/health"
             urllib.request.urlopen(url, timeout=10)
         except Exception:
-            pass  # silently retry next cycle
-
-
-# --------------------------------------------------------------------------
-# Startup
-# --------------------------------------------------------------------------
+            pass  
 
 @app.on_event("startup")
 def on_startup():
     init_db()
-
-    # Start keep-alive pinger daemon thread
     threading.Thread(target=_keepalive_pinger, daemon=True).start()
-
-    # Rehydrate in-memory JOBS from the database so /api/jobs has history
-    # immediately after a restart, instead of starting empty.
     db = next(get_db())
     try:
         records = db.query(JobRecord).all()
@@ -922,10 +770,6 @@ def on_startup():
     finally:
         db.close()
 
-
-# --------------------------------------------------------------------------
-# Auth routes
-# --------------------------------------------------------------------------
 
 @app.post("/api/login")
 def login(req: LoginRequest, response: Response):
@@ -939,14 +783,11 @@ def login(req: LoginRequest, response: Response):
         max_age=COOKIE_MAX_AGE,
         httponly=True,
         samesite="lax",
-        secure=True,  # cookie only sent over HTTPS — Render serves you HTTPS by default
+        secure=True,  
     )
 
-    # Reassign any pre-identity-system 'legacy' job rows to this browser's
-    # new uid so they appear in their history (runs in background — non-blocking).
     uid = get_user_id_from_token(token)
     threading.Thread(target=_claim_legacy_jobs, args=(uid,), daemon=True).start()
-
     return {"ok": True}
 
 
@@ -960,10 +801,6 @@ def logout(response: Response):
 def auth_status(request: Request):
     return {"logged_in": is_logged_in(request)}
 
-
-# --------------------------------------------------------------------------
-# API routes (all protected by require_login)
-# --------------------------------------------------------------------------
 
 @app.post("/api/jobs", dependencies=[Depends(require_login)])
 def create_job(req: DownloadRequest, request: Request):
@@ -1075,12 +912,6 @@ def clear_finished(request: Request, db: Session = Depends(get_db)):
 
 
 def _get_owned_job(job_id: str, user_id: str) -> "Job":
-    """
-    Fetches a job only if it belongs to user_id. Returns 404 (not 403) for
-    a job that exists but belongs to someone else — same response as a
-    job_id that doesn't exist at all, so this never confirms or denies
-    that a given job_id belongs to another user.
-    """
     job = JOBS.get(job_id)
     if not job or job.user_id != user_id:
         raise HTTPException(404, "Job not found")
@@ -1095,17 +926,11 @@ def get_job(job_id: str, request: Request):
 
 @app.get("/api/jobs/{job_id}/download", dependencies=[Depends(require_login)])
 def get_download_url(job_id: str, request: Request):
-    """
-    Returns a pre-signed R2 URL (valid ~1hr) for the finished file.
-    If the R2 upload failed but the file is still on local disk, returns
-    local_only=True so the frontend hits /download-local instead.
-    """
     job = _get_owned_job(job_id, get_user_id(request))
     if not job.download_ready:
         raise HTTPException(409, "File isn't ready yet")
 
     if getattr(job, "upload_failed", False):
-        # File never made it to R2 — stream directly from local disk
         local_path = getattr(job, "local_path", None)
         if not local_path or not os.path.exists(local_path):
             raise HTTPException(
@@ -1127,11 +952,6 @@ def get_download_url(job_id: str, request: Request):
 
 @app.get("/api/jobs/{job_id}/download-local", dependencies=[Depends(require_login)])
 def download_local(job_id: str, request: Request):
-    """
-    Streams the file directly from Render's local disk when the R2 upload
-    failed. Only available until the next server restart — after that the
-    file is gone and the user should retry the job.
-    """
     job = _get_owned_job(job_id, get_user_id(request))
     local_path = getattr(job, "local_path", None)
     if not local_path or not os.path.exists(local_path):
@@ -1181,20 +1001,11 @@ def retry_job(job_id: str, request: Request):
     return create_job(req, request)
 
 
-# --------------------------------------------------------------------------
-# Cookie management — upload fresh cookies and check status
-# --------------------------------------------------------------------------
-
-# Path where uploaded/temporary cookies are stored (writable)
 COOKIES_WRITABLE_DIR = DOWNLOADS_DIR
 COOKIES_WRITABLE_DIR.mkdir(exist_ok=True)
-
-# Map: domain -> filename in COOKIES_WRITABLE_DIR
-# Same as DOMAIN_COOKIE_MAP but these are the writable copies
 COOKIE_EXTRA_INFO_FILE = COOKIES_WRITABLE_DIR / "_cookie_meta.json"
 
 def _load_cookie_meta() -> dict:
-    """Load metadata about when each cookie file was last uploaded."""
     try:
         if COOKIE_EXTRA_INFO_FILE.exists():
             return json.loads(COOKIE_EXTRA_INFO_FILE.read_text())
@@ -1203,7 +1014,6 @@ def _load_cookie_meta() -> dict:
     return {}
 
 def _save_cookie_meta(meta: dict):
-    """Save metadata about cookie upload times."""
     try:
         COOKIE_EXTRA_INFO_FILE.write_text(json.dumps(meta, indent=2, default=str))
     except Exception:
@@ -1215,24 +1025,12 @@ async def upload_cookies(
     file: UploadFile = File(...),
     domain: str = Form("youtube.com"),
 ):
-    """
-    Upload a fresh cookies file for a specific domain.
-    The file is saved to the writable cookies directory and replaces
-    the old cookie file for that domain.
-
-    - file: the cookies.txt / Netscape format cookie file
-    - domain: which site this is for (youtube.com, x.com, facebook.com, instagram.com)
-
-    Returns the domain, filename, and a note.
-    """
     if file.filename is None:
         raise HTTPException(400, "No filename in upload")
 
-    # Map the domain to the expected filename
     domain_lower = domain.lower().strip()
     cookie_filename = DOMAIN_COOKIE_MAP.get(domain_lower)
     if not cookie_filename:
-        # Allow uploading custom cookie files too
         valid_domains = ", ".join(sorted(set(DOMAIN_COOKIE_MAP.values())))
         raise HTTPException(
             400,
@@ -1244,7 +1042,6 @@ async def upload_cookies(
     content = await file.read()
     dest_path.write_bytes(content)
 
-    # Record upload time
     meta = _load_cookie_meta()
     meta[domain_lower] = {
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
@@ -1265,10 +1062,6 @@ async def upload_cookies(
 
 @app.get("/api/cookies/status", dependencies=[Depends(require_login)])
 def cookie_status():
-    """
-    Returns info about all known cookie files: which domains have cookies,
-    when they were last uploaded, and if they look like they might be expired.
-    """
     meta = _load_cookie_meta()
     result = {}
     now = datetime.now(timezone.utc)
@@ -1276,7 +1069,6 @@ def cookie_status():
     for domain, cookie_filename in DOMAIN_COOKIE_MAP.items():
         info = meta.get(domain, {})
 
-        # Check if file exists in either writable dir or original cookies dir
         writable_path = COOKIES_WRITABLE_DIR / cookie_filename
         orig_path = (COOKIES_DIR / cookie_filename) if COOKIES_DIR else None
         exists = writable_path.exists() or (orig_path and orig_path.exists())
@@ -1289,13 +1081,9 @@ def cookie_status():
         if uploaded_at_str:
             try:
                 uploaded_at = datetime.fromisoformat(uploaded_at_str)
-                # Old records saved as naive UTC; new ones are timezone-aware.
-                # Normalise to aware so the subtraction doesn't raise TypeError.
                 if uploaded_at.tzinfo is None:
                     uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
                 age_days = (now - uploaded_at).days
-                # Cookies typically expire after ~7-30 days depending on site
-                # Flag as "expiring" after 7 days, "expired" after 14
                 if age_days >= 14:
                     expired = "expired"
                 elif age_days >= 7:
@@ -1318,19 +1106,11 @@ def cookie_status():
 
 @app.get("/api/cookies/refresher", dependencies=[Depends(require_login)])
 def cookie_refresher_status():
-    """
-    Returns the status of the automatic cookie refresher background service.
-    Useful for checking whether auto-refresh is working.
-    """
     return cookie_refresher.status()
 
 
 @app.post("/api/cookies/force_refresh", dependencies=[Depends(require_login)])
 def trigger_cookie_refresh():
-    """
-    Manually trigger an immediate background cookie refresh.
-    The refresh runs asynchronously; poll /api/cookies/refresher to see when it completes.
-    """
     cookie_refresher.force_refresh()
     return {"ok": True, "message": "Cookie refresh triggered in background. Check /api/cookies/refresher for status."}
 
@@ -1339,14 +1119,6 @@ def trigger_cookie_refresh():
 def health():
     return {"ok": True, "yt_dlp_version": yt_dlp.version.__version__}
 
-
-# --------------------------------------------------------------------------
-# Frontend (static files + login gate)
-# --------------------------------------------------------------------------
-# Static assets (CSS/JS/images) are served unauthenticated, since they're
-# not sensitive — but index.html and any other page is gated by checking
-# the session cookie before falling through to the static file handler.
-# /login itself is always served so people can actually reach the login form.
 
 @app.get("/login")
 def login_page():
@@ -1359,8 +1131,6 @@ def login_page():
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     path = request.url.path
-    # Always allow: the login page itself, the login/logout API calls,
-    # health check, and static assets needed to render the login page.
     public_paths = ("/login", "/api/login", "/api/logout", "/api/auth/status", "/api/health", "/api/cookies/upload", "/api/cookies/status")
     is_static_asset = path.startswith("/static/") or path in ("/favicon.ico",)
 
